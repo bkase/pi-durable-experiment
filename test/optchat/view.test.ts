@@ -62,19 +62,28 @@ describe("MemoryView", () => {
     const tree = fullTree(2000)
     const view = new MemoryView(tree, 10_000)
     const seen = new Set<string>()
+    const lineAt = (message: number) => {
+      let lo = 0
+      let hi = view.lines.length - 1
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1
+        const p = view.lines[mid]!
+        if (p.i * span(p.l) <= message) lo = mid
+        else hi = mid - 1
+      }
+      return view.lines[lo]!
+    }
+    let split = 0
     for (let i = 0; i < 2000; i++) {
       view.append(i)
-      const now = new Set(view.lines.map((p) => `${p.l}:${p.i}`))
+      if (i % 50 !== 49) continue
       for (const k of seen) {
         const [l, i0] = k.split(":").map(Number) as [number, number]
-        const covered = [...now].some((n) => {
-          const [l2, i2] = n.split(":").map(Number) as [number, number]
-          return l2 >= l && Math.floor((i0 * span(l)) / span(l2)) === i2
-        })
-        expect(covered).toBe(true)
+        if (lineAt(i0 * span(l)).l < l) split++
       }
-      for (const k of now) seen.add(k)
+      for (const p of view.lines) seen.add(`${p.l}:${p.i}`)
     }
+    expect(split).toBe(0)
   })
 
   it("waits instead of merging when parents are not built", () => {

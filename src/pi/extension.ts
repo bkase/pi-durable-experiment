@@ -1,15 +1,18 @@
 import { Type } from "@earendil-works/pi-ai"
-import type { EntryRecord } from "@earendil-works/pi-durable"
+import type { Context } from "@earendil-works/chord"
+import type { ConversationId, EntryId, EntryRecord } from "@earendil-works/pi-durable"
 import { defineExtension, defineTool, GenerationTask, hook, section } from "@earendil-works/pi-durable"
 import { MASTER, VIEW_DOC } from "../optchat/prompts.ts"
 import { rewriteRequest } from "./rewrite.ts"
 
 /** What the OptChat extension needs from the memory, in Promise form (see bridge.ts). */
 export interface OptChatBridge {
+  /** The conversation's active transcript entries (from its newest reset on). */
+  readonly entries: (conversationId: ConversationId, context: Context) => Promise<ReadonlyArray<EntryRecord>>
   /** Log every transcript entry not yet logged, in order. */
   readonly project: (entries: ReadonlyArray<EntryRecord>) => Promise<void>
   /** The Memory View frozen for the Run whose first input is `entryId`: settles and renders it once. */
-  readonly runView: (entryId: string, signal: AbortSignal | undefined) => Promise<ReadonlyArray<string>>
+  readonly runView: (entryId: EntryId, signal: AbortSignal | undefined) => Promise<ReadonlyArray<string>>
   readonly zoom: (id: number, n: number) => Promise<string>
   readonly date: (id: number) => Promise<string>
 }
@@ -60,9 +63,9 @@ export const makeOptChatExtension = (bridge: OptChatBridge) => {
     hooks: [
       hook(GenerationTask, {
         beforeRequest: async (request, api, context) => {
-          const view = await api.context(api.conversationId, context)
-          await bridge.project(view.entries)
-          const input = runInput(view.entries)
+          const entries = await bridge.entries(api.conversationId, context)
+          await bridge.project(entries)
+          const input = runInput(entries)
           if (input === undefined) return undefined
           const pieces = await bridge.runView(input.id, context.abortSignal)
           return { messages: rewriteRequest(request.messages, pieces) }

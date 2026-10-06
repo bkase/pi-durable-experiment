@@ -3,7 +3,19 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "effect": "4.0.1",
+    "@cloudflare/computer": "^0.4.1",
+    "@earendil-works/chord": "^1.0.4",
+    "@earendil-works/pi-ai": "^1.0.4",
+    "@earendil-works/pi-durable": "^1.0.4",
+    "alchemy": "^2.0.0-beta.81",
+    "effect": "^4.0.1",
     "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260929.1",
+    "@effect/vitest": "^4.0.1",
+    "@types/node": "^26.6.3",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.2"
   }
 }

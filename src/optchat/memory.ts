@@ -6,7 +6,7 @@ import { type LogDraft, OptChatStore } from "./store.ts"
 import { freeLeaf, freeMerge, key, makeNode, type Node, NodeIndex, parseName, span, start } from "./tree.ts"
 import { MemoryView, renderPieces } from "./view.ts"
 
-export class ModelError extends Schema.TaggedErrorClass<ModelError>()("ModelError", {
+export class ModelError extends Schema.TaggedError<ModelError>()("ModelError", {
   message: Schema.String
 }) {}
 

@@ -3,7 +3,7 @@ import type { LogDraft } from "./store.ts"
 
 /** The parts of a pi-durable transcript entry the Projector reads (structurally typed). */
 export interface ProjectableEntry {
-  readonly id: string
+  readonly id: string | number
   readonly kind: string
   readonly model?: ReadonlyArray<ProjectableMessage>
 }
@@ -92,7 +92,7 @@ export const projectEntry = (entry: ProjectableEntry, eventSource?: string): Log
     }
   }
   return out.map((m, part) => ({
-    entryId: entry.id,
+    entryId: String(entry.id),
     part,
     kind: m.kind,
     text: m.text,
