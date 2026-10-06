@@ -1,0 +1,16 @@
+# The global config holds new releases back 7 days. This experiment targets
+# releases from the last week, so only these packages are exempt (ADR: Q1).
+[install]
+minimumReleaseAgeExcludes = [
+  "effect",
+  "@effect/vitest",
+  "@effect/platform-bun",
+  "@effect/platform-node",
+  "alchemy",
+  "@alchemy.run/frontend-frameworks",
+  "@earendil-works/pi-durable",
+  "@earendil-works/pi-ai",
+  "@earendil-works/chord",
+  "@cloudflare/computer",
+  "just-bash",
+]

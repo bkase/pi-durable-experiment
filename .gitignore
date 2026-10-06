@@ -1,0 +1,7 @@
+node_modules/
+.alchemy/
+dist/
+.wrangler/
+*.log
+.env
+.env.*
