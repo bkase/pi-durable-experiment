@@ -1,4 +1,4 @@
-import { Context, Deferred, Duration, Effect, FiberSet, Layer, Schema } from "effect"
+import { Context, Deferred, Duration, Effect, FiberSet, Layer, Schema, Semaphore } from "effect"
 import { bytes, JOBS, NODE, RETRY_MS, TRIES } from "./constants.ts"
 import { line, type LogMessage } from "./log.ts"
 import { COMPACT, SCALE } from "./prompts.ts"
@@ -63,6 +63,7 @@ const make = Effect.gen(function*() {
   const store = yield* OptChatStore
   const model = yield* CompactorModel
   const fibers = yield* FiberSet.make<void, never>()
+  const appending = yield* Semaphore.make(1)
 
   const index = new NodeIndex()
   for (const node of yield* store.nodes) index.put(node)
@@ -197,7 +198,7 @@ const make = Effect.gen(function*() {
       }
       if (added.length > 0) yield* pump
       return added
-    })
+    }).pipe(Semaphore.withPermits(appending, 1))
 
   const settle = (end: number) =>
     Effect.gen(function*() {
