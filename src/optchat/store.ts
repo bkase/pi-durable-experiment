@@ -1,5 +1,5 @@
 import { Context, Effect, Layer } from "effect"
-import { type Kind, type LogMessage, sizeOf } from "./log.ts"
+import { type Kind, type LogMessage, type LogMeta, sizeOf } from "./log.ts"
 import type { Node } from "./tree.ts"
 
 /** A Log Message before it has an id: where it came from in the pi-durable transcript. */
@@ -20,6 +20,9 @@ export interface OptChatStoreShape {
   /** Append drafts in order; drafts whose (entryId, part) is already logged are skipped. */
   readonly append: (drafts: ReadonlyArray<LogDraft>) => Effect.Effect<ReadonlyArray<LogMessage>>
   readonly count: Effect.Effect<number>
+  /** Every Log Message without its text, in order (loaded once at start). */
+  readonly metas: Effect.Effect<ReadonlyArray<LogMeta>>
+  /** One Log Message with its text, read from storage. */
   readonly message: (i: number) => Effect.Effect<LogMessage | undefined>
   /** Log id of the first message projected from `entryId`. */
   readonly firstOf: (entryId: string) => Effect.Effect<number | undefined>
@@ -56,6 +59,7 @@ export class OptChatStore extends Context.Service<OptChatStore, OptChatStoreShap
           return added
         }),
       count: Effect.sync(() => messages.length),
+      metas: Effect.sync(() => messages.map(({ text: _, ...meta }) => meta)),
       message: (i) => Effect.sync(() => messages[i]),
       firstOf: (entryId) => Effect.sync(() => firsts.get(entryId)),
       projectedEntries: Effect.sync(() => new Set(firsts.keys())),

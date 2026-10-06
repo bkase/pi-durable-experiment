@@ -1,6 +1,6 @@
 import { Context, Deferred, Duration, Effect, FiberSet, Layer, Schema, Semaphore } from "effect"
 import { bytes, JOBS, NODE, RETRY_MS, TRIES } from "./constants.ts"
-import { line, type LogMessage } from "./log.ts"
+import { line, type LogMessage, type LogMeta } from "./log.ts"
 import { COMPACT, SCALE } from "./prompts.ts"
 import { type LogDraft, OptChatStore } from "./store.ts"
 import { freeLeaf, freeMerge, key, makeNode, type Node, NodeIndex, parseName, span, start } from "./tree.ts"
@@ -67,10 +67,8 @@ const make = Effect.gen(function*() {
 
   const index = new NodeIndex()
   for (const node of yield* store.nodes) index.put(node)
-  const T0 = yield* store.count
-  const messages: LogMessage[] = []
-  for (let i = 0; i < T0; i++) messages.push((yield* store.message(i))!)
-  const view = MemoryView.fold(index, T0)
+  const messages: LogMeta[] = [...(yield* store.metas)]
+  const view = MemoryView.fold(index, messages.length)
 
   const busy = new Set<string>()
   const failing = new Set<string>()
@@ -124,7 +122,7 @@ const make = Effect.gen(function*() {
 
   const build = Effect.fnUntraced(function*(l: number, i: number) {
     if (l === 0) {
-      const message = messages[i]!
+      const message = (yield* store.message(i))!
       const free = freeLeaf(message)
       if (free !== undefined) return free
       const step = `${scale}Compress this message into one line, in at most ${NODE} bytes:\n${
@@ -192,9 +190,9 @@ const make = Effect.gen(function*() {
   const append = (drafts: ReadonlyArray<LogDraft>) =>
     Effect.gen(function*() {
       const added = yield* store.append(drafts)
-      for (const message of added) {
-        messages.push(message)
-        view.append(message.i)
+      for (const { text: _, ...meta } of added) {
+        messages.push(meta)
+        view.append(meta.i)
       }
       if (added.length > 0) yield* pump
       return added
@@ -209,11 +207,11 @@ const make = Effect.gen(function*() {
     })
 
   const zoom = (id: number, n: number) =>
-    Effect.sync(() => {
+    Effect.gen(function*() {
       const at = parseName(id, n)
       if (at === undefined || id + n > T()) return `No line ${id}+${n}.`
       if (n === 1) {
-        const m = messages[id]!
+        const m = (yield* store.message(id))!
         return `${id}+0|${line(m.kind, m.text)}`
       }
       const a = index.get(at.l - 1, 2 * at.i)

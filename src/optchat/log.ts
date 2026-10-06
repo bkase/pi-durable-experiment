@@ -13,6 +13,9 @@ export interface LogMessage {
   readonly date: string
 }
 
+/** A Log Message without its text: what stays in memory (text is read from storage on demand). */
+export type LogMeta = Omit<LogMessage, "text">
+
 export const line = (kind: Kind, text: string): string => `${kind}: ${text}`
 
 export const sizeOf = (kind: Kind, text: string): number => bytes(line(kind, text))

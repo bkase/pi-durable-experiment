@@ -1,6 +1,6 @@
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite"
 import { Effect, Layer } from "effect"
-import type { LogMessage } from "../optchat/log.ts"
+import type { LogMessage, LogMeta } from "../optchat/log.ts"
 import { type LogDraft, makeMessage, OptChatStore } from "../optchat/store.ts"
 import type { Node } from "../optchat/tree.ts"
 
@@ -44,18 +44,17 @@ CREATE TABLE IF NOT EXISTS oc_inbox (
 
 type Row = Record<string, unknown>
 
-const toMessage = (row: Row): LogMessage => ({
+const toMeta = (row: Row): LogMeta => ({
   i: Number(row.i),
   kind: row.kind as LogMessage["kind"],
-  text: String(row.text),
   size: Number(row.size),
   date: String(row.date)
 })
 
 /**
  * OptChatStore over the DO's SQLite, through the same queued executor pi-durable uses, so OptChat's
- * writes never interleave with a pi-durable transaction. The Log is also cached in memory: it is
- * append-only and the Memory service reads every message at load.
+ * writes never interleave with a pi-durable transaction. Only message metadata is cached in memory;
+ * texts (up to CAP each) are read on demand, so a long Log fits a Durable Object's memory.
  */
 export const doOptChatStore = (db: SqliteDatabase) =>
   Layer.effect(
@@ -63,8 +62,8 @@ export const doOptChatStore = (db: SqliteDatabase) =>
     Effect.gen(function*() {
       const q = <A>(f: () => Promise<A>) => Effect.promise(f)
       yield* q(() => db.exec(OPTCHAT_SCHEMA))
-      const rows = yield* q(() => db.all<Row>("SELECT i, kind, text, size, date FROM oc_log ORDER BY i"))
-      const messages = rows.map(toMessage)
+      const rows = yield* q(() => db.all<Row>("SELECT i, kind, size, date FROM oc_log ORDER BY i"))
+      const messages: LogMeta[] = rows.map(toMeta)
       const seen = new Set(
         (yield* q(() => db.all<Row>("SELECT entry_id, part FROM oc_log"))).map((r) => `${r.entry_id}#${r.part}`)
       )
@@ -99,14 +98,19 @@ export const doOptChatStore = (db: SqliteDatabase) =>
             )
             for (let k = 0; k < added.length; k++) {
               const d = fresh[k]!
-              messages.push(added[k]!)
+              const { text: _, ...meta } = added[k]!
+              messages.push(meta)
               seen.add(`${d.entryId}#${d.part}`)
               if (!firsts.has(d.entryId)) firsts.set(d.entryId, added[k]!.i)
             }
             return added
           }),
         count: Effect.sync(() => messages.length),
-        message: (i) => Effect.sync(() => messages[i]),
+        metas: Effect.sync(() => [...messages]),
+        message: (i) =>
+          q(() => db.get<Row>("SELECT i, kind, text, size, date FROM oc_log WHERE i = ?", i)).pipe(
+            Effect.map((row) => (row === undefined ? undefined : { ...toMeta(row), text: String(row.text) }))
+          ),
         firstOf: (entryId) => Effect.sync(() => firsts.get(entryId)),
         projectedEntries: Effect.sync(() => new Set(firsts.keys())),
         putNode: (node: Node) =>
