@@ -10,3 +10,4 @@ OptChat needs every Run to start fresh (Memory View + new input) while keeping t
 
 - The model never sees pi-durable's accumulated transcript, even though storage holds all of it.
 - Prompt-cache breakpoints inside the Memory View can't be expressed through pi-ai `Message`s; they need a provider wrapper using pi-ai's `onPayload`.
+- Each Run begins with a pi-durable `reset()` (ADR 0005), so the transcript's active context is one Run; the Projector logs entries as they are appended, so nothing before the reset is ever needed again.
