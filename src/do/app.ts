@@ -12,6 +12,7 @@ import type {
 import { createRegistry, Harness } from "@earendil-works/pi-durable"
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite"
 import { Effect, Layer, ManagedRuntime } from "effect"
+import { ChatGPT, type KeyValue } from "../models/chatgpt.ts"
 import { MasterModels } from "../models/models.ts"
 import { type CompactorModel, Memory, type MemoryStatus } from "../optchat/memory.ts"
 import { LOGGED_KINDS, projectEntry } from "../optchat/projector.ts"
@@ -49,6 +50,11 @@ export interface App {
   readonly busy: () => Promise<boolean>
   /** Resolves when nothing is pending, or after `ms`. */
   readonly settle: (ms: number) => Promise<void>
+  readonly login: {
+    readonly start: () => Promise<string>
+    readonly finish: (redirectUrl: string) => Promise<void>
+    readonly status: () => Promise<{ readonly signedIn: boolean; readonly expires?: number }>
+  }
   readonly subscribe: (listener: (events: ReadonlyArray<AgentEvent>) => void) => () => void
   readonly snapshot: () => AgentEventStream["snapshot"]
 }
@@ -57,8 +63,8 @@ export interface AppOptions {
   readonly storage: DoStorage
   readonly workspace: Workspace
   readonly exec: boolean
-  /** Model access: `MockModels` or the live ChatGPT-backed layer. */
-  readonly models: Layer.Layer<MasterModels | CompactorModel>
+  /** Model access over the DO's key-value store: mock models, or the live ChatGPT-backed layer. */
+  readonly models: (kv: KeyValue) => Layer.Layer<MasterModels | CompactorModel | ChatGPT>
   readonly onError: (error: unknown) => void
 }
 
@@ -68,13 +74,22 @@ export const openApp = async (options: AppOptions): Promise<App> => {
   const db = new DoSqliteDatabase(options.storage)
   const storage = await SqliteStorage.open(db)
 
+  await db.exec("CREATE TABLE IF NOT EXISTS oc_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+  const kv: KeyValue = {
+    get: async (key) => {
+      const row = await db.get<Row>("SELECT value FROM oc_kv WHERE key = ?", key)
+      return row === undefined ? undefined : String(row.value)
+    },
+    set: (key, value) => db.run("INSERT OR REPLACE INTO oc_kv (key, value) VALUES (?, ?)", key, value),
+    delete: (key) => db.run("DELETE FROM oc_kv WHERE key = ?", key)
+  }
   const layer = Memory.layer.pipe(
     Layer.provideMerge(doOptChatStore(db)),
-    Layer.provideMerge(options.models)
+    Layer.provideMerge(options.models(kv))
   )
   const runtime = ManagedRuntime.make(layer)
-  const run = <A>(effect: Effect.Effect<A, never, Memory | OptChatStore | MasterModels | CompactorModel>) =>
-    runtime.runPromise(effect)
+  type Services = Memory | OptChatStore | MasterModels | CompactorModel | ChatGPT
+  const run = <A, E = never>(effect: Effect.Effect<A, E, Services>) => runtime.runPromise(effect)
   const memory = await run(Effect.gen(function*() {
     return yield* Memory
   }))
@@ -83,6 +98,9 @@ export const openApp = async (options: AppOptions): Promise<App> => {
   }))
   const { models, master } = await run(Effect.gen(function*() {
     return yield* MasterModels
+  }))
+  const chatgpt = await run(Effect.gen(function*() {
+    return yield* ChatGPT
   }))
 
   let harness!: PiHarness
@@ -283,6 +301,11 @@ export const openApp = async (options: AppOptions): Promise<App> => {
         await drain()
       }
       await syncLog()
+    },
+    login: {
+      start: () => run(chatgpt.start),
+      finish: (redirectUrl) => run(chatgpt.finish(redirectUrl)),
+      status: () => run(chatgpt.status)
     },
     subscribe: (listener) => {
       listeners.add(listener)

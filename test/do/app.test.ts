@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { type App, openApp } from "../../src/do/app.ts"
+import { Layer } from "effect"
+import { ChatGPT } from "../../src/models/chatgpt.ts"
 import { MockModels } from "../../src/models/models.ts"
 import { nodeDoStorage } from "../support/node-do-storage.ts"
 
@@ -16,7 +18,7 @@ const open = (storage = nodeDoStorage()) =>
     storage,
     workspace: {} as never,
     exec: false,
-    models: MockModels,
+    models: (kv) => Layer.merge(MockModels, ChatGPT.layer(kv)),
     onError: (e) => console.error(e)
   })
 

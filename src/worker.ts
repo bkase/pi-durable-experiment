@@ -5,7 +5,9 @@ import jq from "@cloudflare/computer/shell/jq"
 import { DurableObject } from "cloudflare:workers"
 import { deliveryId, parseHookPath, presentedToken, safeEqual } from "./auth.ts"
 import { type App, openApp } from "./do/app.ts"
-import { MockModels } from "./models/models.ts"
+import { ChatGPT } from "./models/chatgpt.ts"
+import { LiveModels, MockModels } from "./models/models.ts"
+import { Layer } from "effect"
 import { decodeClientMessage, type ServerMessage } from "./protocol.ts"
 import { SHELL_BACKEND } from "./pi/workspace-tools.ts"
 
@@ -18,6 +20,8 @@ export interface Env {
   readonly OPTCHAT_TOKEN: string
   /** "mock" (default) runs scripted models; "live" uses the ChatGPT credential. */
   readonly MODEL_MODE?: string
+  /** "on" sends the spec's explicit cache marks (unverified Responses API fields). */
+  readonly CACHE_MARKS?: string
 }
 
 const CHAT = "main"
@@ -81,7 +85,12 @@ export class Chat extends DurableObject<Env> {
       storage: this.ctx.storage as never,
       workspace: this.workspace,
       exec: this.env.LOADER !== undefined,
-      models: MockModels,
+      models: (kv) =>
+        this.env.MODEL_MODE === "live"
+          ? LiveModels({ serviceTier: "priority", explicitCacheMarks: this.env.CACHE_MARKS === "on" }).pipe(
+            Layer.provideMerge(ChatGPT.layer(kv))
+          )
+          : Layer.merge(MockModels, ChatGPT.layer(kv)),
       onError: (error) => console.error("optchat:", error)
     }).then((app) => {
       app.subscribe((events) => this.broadcast({ type: "events", events }))
@@ -165,8 +174,13 @@ export class Chat extends DurableObject<Env> {
           await app.setInstructions(message.text)
           return ok("saved")
         case "login.start":
+          return ok(
+            `Open this URL, sign in, then paste the URL the browser lands on (it will fail to load; that is expected) with /login <url>:\n${await app
+              .login.start()}`
+          )
         case "login.finish":
-          return reply({ type: "result", id, ok: false, error: "Sign in with ChatGPT is not wired up yet (mock models)." })
+          await app.login.finish(message.url)
+          return ok(`Signed in to ChatGPT.${this.env.MODEL_MODE === "live" ? "" : " Deploy with MODEL_MODE=live to use it."}`)
       }
     } catch (error) {
       reply({ type: "result", id, ok: false, error: error instanceof Error ? error.message : String(error) })

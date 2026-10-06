@@ -3,7 +3,8 @@ import { createModels } from "@earendil-works/pi-ai/models"
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux"
 import { Context, Effect, Layer } from "effect"
 import { bytes, NODE } from "../optchat/constants.ts"
-import { CompactorModel } from "../optchat/memory.ts"
+import { CompactorModel, ModelError } from "../optchat/memory.ts"
+import { ChatGPT } from "./chatgpt.ts"
 
 export const PROVIDER = "openai"
 export const MASTER_MODEL = "gpt-6.1-sol"
@@ -119,4 +120,113 @@ export const MockModels = Layer.mergeAll(
     return MasterModels.of({ models, master: { provider: PROVIDER, modelId: MASTER_MODEL } })
   }),
   mockCompactor
+)
+
+export interface LiveOptions {
+  /** OpenAI `service_tier`; the user chose priority ("high speed"). */
+  readonly serviceTier: "priority" | "default"
+  /**
+   * Mark the Memory View pieces as cache breakpoints and keep reasoning across the Run, as the
+   * OptChat spec measured. Off by default: the exact Responses API fields are unverified here.
+   */
+  readonly explicitCacheMarks: boolean
+}
+
+/** Rewrite an OpenAI Responses payload: priority tier, and optionally the spec's cache marks. */
+export const shapePayload = (options: LiveOptions) => (payload: unknown): unknown => {
+  const body = payload as Record<string, unknown>
+  const out: Record<string, unknown> = { ...body, service_tier: options.serviceTier }
+  if (!options.explicitCacheMarks) return out
+  out.reasoning = { ...(body.reasoning as object | undefined), context: "all_turns" }
+  const input = body.input as Array<Record<string, unknown>> | undefined
+  const first = input?.find((item) => item.role === "user")
+  const parts = first?.content as Array<Record<string, unknown>> | undefined
+  if (parts !== undefined) {
+    let inView = false
+    for (const part of parts) {
+      const text = typeof part.text === "string" ? part.text : ""
+      if (text.startsWith("<chat>")) inView = true
+      if (inView) part.prompt_cache_breakpoint = true
+      if (text.endsWith("</chat>")) break
+    }
+  }
+  return out
+}
+
+/** The real models, on the ChatGPT credential the Durable Object holds (ADR 0003). */
+export const LiveModels = (options: LiveOptions) =>
+  liveCompactor.pipe(Layer.provideMerge(liveMaster(options)))
+
+const liveMaster = (options: LiveOptions) =>
+  Layer.effect(
+    MasterModels,
+    Effect.gen(function*() {
+      const chatgpt = yield* ChatGPT
+      const services = yield* Effect.context<never>()
+      const { openaiProvider } = yield* Effect.promise(() => import("@earendil-works/pi-ai/providers/openai"))
+      const inner = openaiProvider()
+      const shape = shapePayload(options)
+      const provider = {
+        ...inner,
+        auth: {
+          apiKey: {
+            name: "Sign in with ChatGPT",
+            resolve: async () => ({
+              auth: { apiKey: await Effect.runPromiseWith(services)(chatgpt.token) },
+              source: "Sign in with ChatGPT"
+            })
+          }
+        },
+        streamSimple: (model: never, context: never, opts?: Record<string, unknown>) =>
+          inner.streamSimple(model, context, { ...opts, onPayload: (p: unknown) => shape(p) } as never)
+      }
+      const models = createModels()
+      models.setProvider(provider as never)
+      return MasterModels.of({ models, master: { provider: PROVIDER, modelId: MASTER_MODEL } })
+    })
+  )
+
+/** The Compactor on `gpt-6-luna` at medium effort (the spec ran its compactor at medium). */
+const liveCompactor = Layer.effect(
+  CompactorModel,
+  Effect.gen(function*() {
+    const { models } = yield* MasterModels
+    const model = models.getModel(PROVIDER, COMPACTOR_MODEL)
+    if (model === undefined) return yield* Effect.die(new Error(`no model ${COMPACTOR_MODEL}`))
+    return CompactorModel.of({
+      complete: (system, turns) =>
+        Effect.tryPromise({
+          try: async () => {
+            const now = Date.now()
+            const messages: Message[] = turns.map((turn) =>
+              turn.role === "user"
+                ? { role: "user", content: turn.content.map((text) => ({ type: "text", text })), timestamp: now }
+                : ({
+                  role: "assistant",
+                  content: [{ type: "text", text: turn.content.join("") }],
+                  api: model.api,
+                  provider: model.provider,
+                  model: model.id,
+                  usage: {
+                    input: 0,
+                    output: 0,
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    totalTokens: 0,
+                    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+                  },
+                  stopReason: "stop",
+                  timestamp: now
+                } as AssistantMessage)
+            )
+            const reply = await models.completeSimple(model, { systemPrompt: system, messages } as never, {
+              reasoning: "medium"
+            })
+            if (reply.stopReason === "error") throw new Error(reply.errorMessage ?? "compactor request failed")
+            return reply.content.map((b) => (b.type === "text" ? b.text : "")).join("")
+          },
+          catch: (e) => new ModelError({ message: e instanceof Error ? e.message : String(e) })
+        })
+    })
+  })
 )
