@@ -18,5 +18,12 @@
     "@types/node": "^26.6.3",
     "typescript": "^5.9.3",
     "vitest": "^5.0.2"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p .",
+    "local": "PORT=${PORT:-8797} scripts/local.sh",
+    "chat": "bun cli/optchat.ts",
+    "deploy": "alchemy deploy --profile ${ALCHEMY_PROFILE:-personal}"
   }
 }
