@@ -5,3 +5,5 @@ dist/
 *.log
 .env
 .env.*
+.local/
+.local-workerd.log

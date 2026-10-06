@@ -44,33 +44,59 @@ const newline = () => {
 }
 
 let onRunEnd: (() => void) | undefined
+/** Whether the current message's text already streamed (else print it whole at its end). */
+let streamed = false
 
-/** Render pi-durable agent events as plain lines. */
+/** Render pi-durable agent events (watchEvents) as plain lines. */
 const render = (event: Record<string, any>) => {
   switch (event.type) {
-    case "message_update": {
-      const delta = event.delta ?? event.assistantMessageEvent
-      if (delta?.type === "text_delta") write(delta.delta)
-      else if (delta?.type === "thinking_delta") write(dim(delta.delta))
+    case "message_start":
+      streamed = false
       break
-    }
-    case "message_end":
+    case "message_update":
+      for (const change of event.changes ?? []) {
+        if (change.type === "text_delta") {
+          streamed = true
+          write(change.delta)
+        } else if (change.type === "thinking_delta") write(dim(change.delta))
+      }
+      break
+    case "message_end": {
+      const message = event.entry?.model?.[0]
+      if (!streamed && message?.role === "assistant") {
+        for (const block of message.content ?? []) if (block.type === "text") write(block.text)
+      }
+      if (message?.role === "user" && mode === "chat") {
+        const text = typeof message.content === "string" ? message.content : message.content.map((b: any) => b.text ?? "").join("")
+        write(bold(`› ${text.length > 200 ? `${text.slice(0, 200)}…` : text}`))
+      }
+      streamed = false
       newline()
       break
+    }
     case "tool_execution_start":
       newline()
       write(dim(`→ ${event.toolName} ${JSON.stringify(event.args ?? {})}\n`))
       break
     case "tool_execution_end": {
-      const text = (event.result?.content ?? [])
+      const result = event.entry?.model?.[0]
+      const text = (result?.content ?? [])
         .filter((b: any) => b.type === "text")
         .map((b: any) => b.text)
         .join("\n")
       const short = text.length > 400 ? `${text.slice(0, 400)}…` : text
-      write(dim(`← ${event.toolName}${event.isError ? " (error)" : ""}: ${short.replace(/\n/g, "\n  ")}\n`))
+      write(dim(`← ${event.toolName}${result?.isError ? " (error)" : ""}: ${short.replace(/\n/g, "\n  ")}\n`))
       break
     }
-    case "agent_end":
+    case "auto_retry_start":
+      newline()
+      write(dim(`(retrying: ${event.errorMessage})\n`))
+      break
+    case "task_failed":
+      newline()
+      write(dim(`(failed: ${event.message})\n`))
+      break
+    case "run_end":
       newline()
       onRunEnd?.()
       break

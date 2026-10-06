@@ -10,10 +10,8 @@ import type { Chat } from "./src/worker.ts"
  */
 export const Worker = Cloudflare.Worker("OptChat", {
   main: "./src/worker.ts",
-  compatibility: {
-    date: "2026-09-30",
-    flags: ["nodejs_compat", "enable_ctx_exports"]
-  },
+  // nodejs_compat and ctx.exports are on by default at this date.
+  compatibility: { date: "2026-09-25" },
   limits: { cpuMs: 300_000 },
   observability: { enabled: true, logs: { enabled: true, invocationLogs: true } },
   env: {

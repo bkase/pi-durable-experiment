@@ -188,7 +188,8 @@ export class Chat extends DurableObject<Env> {
   }
 
   override async webSocketClose(socket: WebSocket, code: number, reason: string) {
-    socket.close(code, reason)
+    // 1005/1006 are reported, never sent.
+    socket.close(code === 1005 || code === 1006 ? 1000 : code, reason)
   }
 
   override async alarm() {
