@@ -1,83 +1,105 @@
-# OptChat on pi-durable, in a Durable Object
+# OptChat on pi-durable, in a Cloudflare Durable Object
 
-An experiment: one endless chat with an agent that remembers everything, built from
+An experiment: **one endless chat with an agent that remembers everything**, running as a single always-on Cloudflare Durable Object.
 
-- **[pi-durable](https://www.npmjs.com/package/@earendil-works/pi-durable) 1.0** — the durable agent harness (crash-safe Runs, tasks, tool calls), running inside a **Cloudflare Durable Object** on the object's own SQLite;
-- **[OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449)** memory — every message kept verbatim, compressed into a binary Summary Tree, and each Run starts fresh from a fixed-size Memory View of the whole chat;
-- **Effect v4** for the OptChat core and **Alchemy v2** for infrastructure;
-- **`@cloudflare/computer`** for the agent's Workspace: a SQLite-backed filesystem plus a bash-compatible shell (just-bash in a Dynamic Worker).
+- **[pi-durable](https://www.npmjs.com/package/@earendil-works/pi-durable)** (pi 1.0) is the agent harness: Runs, tool calls and their checkpoints are committed before anything is shown, so a crashed or evicted object picks its work back up. Here it runs on the Durable Object's own SQLite.
+- **[OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449)** (Victor Taelin's design) is the memory: every message is kept verbatim, a cheap model compresses the history into a binary tree of one-line summaries, and every Run starts **fresh** from a fixed-size *Memory View* of the whole chat — recent messages one per line, older ones coarser. The agent `zoom`s into any line, down to the original message. No context rot, no compaction, constant cost.
+- **[Effect v4](https://effect.website)** for the OptChat core, **[Alchemy v2](https://alchemy.run)** for infrastructure.
+- **[`@cloudflare/computer`](https://www.npmjs.com/package/@cloudflare/computer)** gives the agent a Workspace: a SQLite-backed filesystem in the same object and a bash-compatible shell ([just-bash](https://github.com/vercel-labs/just-bash)) running in a Dynamic Worker.
 
-The vocabulary is in [`CONTEXT.md`](CONTEXT.md); the decisions and their reasons are in [`docs/adr/`](docs/adr).
+The design was worked out interview-style first; the vocabulary is in [`CONTEXT.md`](CONTEXT.md) and each non-obvious decision has an ADR in [`docs/adr/`](docs/adr).
+
+## What it does
+
+- **Chat** from a terminal client over a WebSocket; typing while the agent works steers the running Run.
+- **Remember** everything, forever, at a constant prompt size (the Memory View stays at ~128 KB / ~64k tokens however long the chat gets).
+- **React to the outside world**: webhooks (GitHub, Stripe, your deploys…) arrive as `event` messages — logged and answered, but never treated as the user's instructions.
+- **Work** in its Workspace: read, write, edit, find, grep files, and run shell pipelines with `curl` and `jq`.
+- **Survive** crashes, evictions and deploys mid-Run: an alarm heartbeat wakes the object and pi-durable resumes; a tool that may have half-run is reported to the model as interrupted, never silently re-run.
 
 ## How a Run works
 
 ```
-input ──► Chat DO ──► reset() + submit ──► pi-durable generation
-                                              │ beforeRequest (OptChat extension)
-                                              ▼
-              [system: OptChat prompt + view doc + Standing Instructions + tools]
-              [user:   <chat> Memory View (frozen for this Run) </chat> + input]
-              [this Run's own Turns: tool calls, results …]
-every committed entry ──► Projector ──► Log ──► Compactor (gpt-6-luna) ──► Summary Tree ──► Memory View
+input ──► Chat Durable Object ──► reset() + submit ──► pi-durable generation
+                                                          │ beforeRequest (OptChat extension)
+                                                          ▼
+              [system: OptChat prompt + view doc + Standing Instructions + tools]   ← byte-identical every Run
+              [user:   <chat> Memory View, frozen for this Run </chat> + the input]
+              [this Run's own Turns: tool calls and results, append-only]
+
+every committed entry ──► Projector ──► Log ──► Compactor ──► Summary Tree ──► Memory View
 ```
 
-- The pi-durable transcript **is** the Log (ADR 0001); the Projector turns entries into Log Messages (`user`, `talk`, `tool`, `echo`, `event`) and never logs thinking.
-- Webhook deliveries are `event`s, not the user's words, and wait their turn (ADR 0004).
-- An evicted object is a crashed one: an alarm heartbeat wakes it while work is pending and `resume()` finishes the Run (ADR 0005, verified locally with `kill -9` mid-tool).
+- The pi-durable transcript **is** the Log ([ADR 0001](docs/adr/0001-transcript-is-the-log.md)); the Projector turns entries into Log Messages (`user`, `talk`, `tool`, `echo`, `event`) and never logs model thinking.
+- Each Run starts with a pi-durable `reset()`, so per-request work is one Run, not the whole history ([ADR 0005](docs/adr/0005-plain-durable-object-in-an-async-worker.md)).
+- Models: Master `gpt-6.1-sol`, Compactor `gpt-6-luna`, via "Sign in with ChatGPT" run inside the Durable Object, which alone holds and refreshes the credential ([ADR 0003](docs/adr/0003-sign-in-with-chatgpt-owned-by-the-do.md)). Scripted mock models (Effect layers) run everything without an account.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `src/optchat/` | The OptChat core in Effect: Log, Summary Tree, Memory View fold, Compactor pump, prompts (verbatim from the spec, plus the `event` kind) |
-| `src/pi/` | The seam to pi-durable: request rewrite, the OptChat extension (`zoom`, `date`, hook), Workspace tools, the DO SQLite adapter |
-| `src/do/` | The app the Durable Object runs: Runs, steering, the Event inbox, catch-up projection; OptChat's SQL tables |
-| `src/models/` | Model access as Effect layers: `MockModels` (scripted) and `LiveModels` (ChatGPT sign-in, priority tier) |
+| `src/optchat/` | The OptChat core in Effect: Log, Summary Tree, Memory View fold, Compactor pump, the spec's prompts (verbatim, plus the `event` kind) |
+| `src/pi/` | The seam to pi-durable: request rewrite, the OptChat extension (`zoom`, `date`, the request hook), Workspace tools, the Durable Object SQLite adapter |
+| `src/do/` | What the Durable Object runs: Runs, steering, the Event inbox, catch-up projection, OptChat's tables |
+| `src/models/` | Model access as Effect layers: `MockModels` and `LiveModels` (ChatGPT sign-in, priority tier) |
 | `src/worker.ts` | The Worker (auth, routing) and the `Chat` Durable Object (WebSocket, webhooks, alarm) |
 | `alchemy.run.ts` | The stack: Worker, `Chat` namespace, Worker Loader, shared token |
 | `cli/optchat.ts` | Terminal client |
 
-## Run it locally (real workerd)
+## Quick start
+
+Requires Node 24+ and [Bun](https://bun.sh) (for the CLI). The releases used here were days old when this was written; `.npmrc` / `bunfig.toml` exempt exactly these packages from a 7-day release-age gate — drop them if you don't use one.
 
 ```sh
 npm install
-PORT=8797 scripts/local.sh                       # token: dev-token, mock models
+npm test                                   # unit, pi-durable's storage conformance suite, end-to-end with mock models
+```
+
+### Run locally, in workerd (the real Workers runtime)
+
+```sh
+PORT=8797 scripts/local.sh                 # macOS arm64 workerd binary; token "dev-token"; mock models
 OPTCHAT_URL=http://127.0.0.1:8797 OPTCHAT_TOKEN=dev-token bun cli/optchat.ts
 ```
 
-With mock models, `/mock <tool> …` makes the scripted Master call a tool: `/mock zoom 0 4`, `/mock exec ls -la /`, `/mock write /notes/a.md hi`, `/mock read /notes/a.md`.
+With mock models, `/mock <tool> …` makes the scripted agent call a tool: `/mock zoom 0 4`, `/mock exec ls -la /`, `/mock write /notes/a.md hi`.
 
-## Deploy
-
-```sh
-npx alchemy profile refresh --profile personal   # once, if it needs re-auth
-npx alchemy deploy --profile personal            # reads OPTCHAT_TOKEN from .env
-```
-
-`.env` (git-ignored) holds the shared token: the CLI sends it as `Authorization: Bearer`, webhooks use the header or `POST /hook/<token>/<source>`.
-
-## Talk to it
+### Deploy to Cloudflare
 
 ```sh
-OPTCHAT_URL=https://<worker>.workers.dev OPTCHAT_TOKEN=$(grep OPTCHAT_TOKEN .env | cut -d= -f2) bun cli/optchat.ts
+echo "OPTCHAT_TOKEN=$(openssl rand -hex 32)" > .env   # the shared token (git-ignored)
+npx alchemy deploy --profile <your-alchemy-profile>   # prints the Worker URL
 ```
 
-Plain lines are input (a steer while a Run is going). Commands: `/status`, `/view`, `/zoom <id> <n>`, `/abort`, `/instructions`, `/instructions set <text>`, `/login`, `/login <redirect-url>`, `/quit`. One-shot: `bun cli/optchat.ts send "text"`.
+Worker Loader (Dynamic Workers) needs a paid Workers plan.
 
-Webhooks: `curl -X POST -H "X-GitHub-Delivery: <id>" -d @payload.json https://…/hook/<token>/github`. The delivery id (or a hash of the body) deduplicates retries.
-
-## Real models
-
-1. In the CLI: `/login`, open the URL, sign in with ChatGPT; the browser then fails to load `127.0.0.1:1455/…` — copy that URL and send `/login <url>`. The credential stays in the Durable Object.
-2. Add `MODEL_MODE=live` to `.env` and `npm run deploy` (Master `gpt-6.1-sol`, Compactor `gpt-6-luna`, `service_tier: priority`). `CACHE_MARKS=on` also sends the spec's explicit cache breakpoints, whose Responses API field names are unverified.
-
-## Tests
+### Talk to it
 
 ```sh
-npx vitest run        # unit + pi-durable storage conformance + end-to-end app tests (mock models)
-npx tsc -p .
+OPTCHAT_URL=https://<your-worker>.workers.dev OPTCHAT_TOKEN=<token> bun cli/optchat.ts
 ```
 
-## Status
+Plain lines are input. Commands: `/status`, `/view`, `/zoom <id> <n>`, `/abort`, `/instructions`, `/instructions set <text>`, `/login`, `/login <redirect-url>`, `/quit`. One-shot: `bun cli/optchat.ts send "text"`.
 
-Deployed with the `personal` profile (brandernan@) at `https://pi-durable-experiment-optchat-x6c7eonasboqurixmxb24m2c.brandernan.workers.dev` (stage `live_bkase`, mock models). Verified in production: pi-durable on Durable Object SQLite, Runs over the Memory View, `zoom`, Workspace write and just-bash `exec` through Dynamic Workers (no `experimental` flag), steering mid-Run, webhook Events with dedupe and auth, Standing Instructions, and a deploy in the middle of a long `exec`: the Run resumes, the tool is reported as interrupted, and the object stays reachable (ADR 0006). Not yet verified: real models (needs `/login`, then `MODEL_MODE=live`), cache hit rates, and whether ChatGPT tokens get the priority tier.
+Webhooks: `curl -X POST -H "X-GitHub-Delivery: <id>" -d @payload.json https://<worker>/hook/<token>/github` — the delivery id (or a hash of the body) deduplicates retries.
+
+### Use real models
+
+1. In the CLI, `/login` and open the URL to sign in with ChatGPT. The browser then fails to load `127.0.0.1:1455/…` — that's expected; send that URL back with `/login <url>`.
+2. Add `MODEL_MODE=live` to `.env` and redeploy. (`CACHE_MARKS=on` also sends the OptChat spec's explicit cache breakpoints; their Responses API field names are unverified.)
+
+## Status and findings
+
+Verified on Cloudflare (with mock models): pi-durable on Durable Object SQLite; Runs over the Memory View; `zoom`; Workspace writes and just-bash `exec` through Dynamic Workers (no `experimental` flag needed); steering mid-Run; webhook Events with dedupe and auth; a deploy in the middle of a long `exec` — the Run resumes and the object stays reachable.
+
+Things learned the hard way:
+
+- **A Dynamic Worker outlives the Durable Object that started it.** After a deploy, a still-running shell command called back into a reset instance whose storage threw on every call; background work spun until the CPU limit and the object was unreachable for minutes. The adapter now treats lost storage as fatal and the object calls `ctx.abort()` ([ADR 0006](docs/adr/0006-discard-instances-whose-storage-is-gone.md)).
+- **pi-durable hooks can't read the transcript**, and pi-durable rebuilds the whole active context on every request — hence a `reset()` per Run.
+- **The Memory View behaves as the spec says** under simulation: it holds at its budget, and the prefix shared by consecutive Runs grows with history ([results](docs/experiments/memory-simulation.md)).
+
+Not yet verified: behaviour with real models, prompt-cache hit rates, and whether ChatGPT tokens get the priority tier.
+
+## Limits
+
+One chat, one user, one shared token. The shell is an emulator — no real binaries, `npm`, or `git` (a Container backend would add them). No browser tool yet. pi-durable and `@cloudflare/computer` are both marked experimental.
