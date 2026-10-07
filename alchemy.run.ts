@@ -12,7 +12,8 @@ export const Worker = Cloudflare.Worker("OptChat", {
   main: "./src/worker.ts",
   // nodejs_compat and ctx.exports are on by default at this date.
   compatibility: { date: "2026-09-25" },
-  limits: { cpuMs: 300_000 },
+  // Per event. Normal events use well under a second; this caps any runaway loop quickly.
+  limits: { cpuMs: 30_000 },
   observability: { enabled: true, logs: { enabled: true, invocationLogs: true } },
   env: {
     Chat: Cloudflare.DurableObject<Chat>("Chat"),

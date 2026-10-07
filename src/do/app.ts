@@ -66,12 +66,14 @@ export interface AppOptions {
   /** Model access over the DO's key-value store: mock models, or the live ChatGPT-backed layer. */
   readonly models: (kv: KeyValue) => Layer.Layer<MasterModels | CompactorModel | ChatGPT>
   readonly onError: (error: unknown) => void
+  /** This object's storage is gone (the instance was reset): discard the instance. */
+  readonly onFatal?: (error: Error) => void
 }
 
 type Row = Record<string, unknown>
 
 export const openApp = async (options: AppOptions): Promise<App> => {
-  const db = new DoSqliteDatabase(options.storage)
+  const db = new DoSqliteDatabase(options.storage, options.onFatal)
   const storage = await SqliteStorage.open(db)
 
   await db.exec("CREATE TABLE IF NOT EXISTS oc_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -291,14 +293,16 @@ export const openApp = async (options: AppOptions): Promise<App> => {
     busy,
     settle: async (ms) => {
       const deadline = Date.now() + ms
-      while (Date.now() < deadline && (await busy())) {
-        await Promise.race([
-          root.waitForIdle(ctx),
-          run(memory.idle),
-          new Promise((resolve) => setTimeout(resolve, Math.min(5_000, deadline - Date.now())))
-        ])
+      const timeout = () => new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(30_000, deadline - Date.now()))))
+      while (Date.now() < deadline) {
+        // Wait only on what is actually pending; an already-settled promise here would spin.
+        if (running) await Promise.race([root.waitForIdle(ctx), timeout()])
+        else if ((await run(memory.status)).busy > 0) await Promise.race([run(memory.idle), timeout()])
+        else if (await busy()) {
+          await drain()
+          await new Promise((resolve) => setTimeout(resolve, 250))
+        } else break
         await syncLog()
-        await drain()
       }
       await syncLog()
     },

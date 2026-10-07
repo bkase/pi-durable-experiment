@@ -48,3 +48,33 @@ describe("DoSqliteDatabase transactions", () => {
     await expect(leaked!.run("INSERT INTO t (v) VALUES (1)")).rejects.toThrow("no longer active")
   })
 })
+
+describe("DoSqliteDatabase after the object's storage is lost", () => {
+  it("reports the fatal error once per failing call and still rejects", async () => {
+    const base = nodeDoStorage()
+    let lost = false
+    const storage = {
+      ...base,
+      sql: {
+        exec(query: string, ...bindings: unknown[]) {
+          if (lost) throw new Error("Network connection lost.")
+          return base.sql.exec(query, ...bindings)
+        }
+      }
+    }
+    const fatal: string[] = []
+    const db = new DoSqliteDatabase(storage, (e) => fatal.push(e.message))
+    await db.exec("CREATE TABLE t (v INTEGER)")
+    lost = true
+    await expect(db.get("SELECT * FROM t")).rejects.toThrow("Network connection lost")
+    await expect(db.transaction((tx) => tx.run("INSERT INTO t (v) VALUES (1)"))).rejects.toThrow("Network connection lost")
+    expect(fatal).toEqual(["Network connection lost.", "Network connection lost."])
+  })
+
+  it("does not treat ordinary SQL errors as fatal", async () => {
+    const fatal: string[] = []
+    const db = new DoSqliteDatabase(nodeDoStorage(), (e) => fatal.push(e.message))
+    await expect(db.get("SELECT * FROM missing")).rejects.toThrow()
+    expect(fatal).toEqual([])
+  })
+})

@@ -80,4 +80,4 @@ npx tsc -p .
 
 ## Status
 
-Verified in local workerd: pi-durable on DO SQLite, Runs over the Memory View, `zoom`, Workspace write and just-bash `exec` through Worker Loader, webhook Events with dedupe and auth, restarts, and alarm-driven recovery after `kill -9`. Not yet verified: a Cloudflare deploy (waiting on the profile), real-model behaviour and cache hit rates, and whether ChatGPT tokens get the priority tier.
+Deployed with the `personal` profile (brandernan@) at `https://pi-durable-experiment-optchat-x6c7eonasboqurixmxb24m2c.brandernan.workers.dev` (stage `live_bkase`, mock models). Verified in production: pi-durable on Durable Object SQLite, Runs over the Memory View, `zoom`, Workspace write and just-bash `exec` through Dynamic Workers (no `experimental` flag), steering mid-Run, webhook Events with dedupe and auth, Standing Instructions, and a deploy in the middle of a long `exec`: the Run resumes, the tool is reported as interrupted, and the object stays reachable (ADR 0006). Not yet verified: real models (needs `/login`, then `MODEL_MODE=live`), cache hit rates, and whether ChatGPT tokens get the priority tier.

@@ -91,10 +91,20 @@ export class Chat extends DurableObject<Env> {
             Layer.provideMerge(ChatGPT.layer(kv))
           )
           : Layer.merge(MockModels, ChatGPT.layer(kv)),
-      onError: (error) => console.error("optchat:", error)
+      onFatal: (error) => {
+        // Background work (pi-durable's scheduler, the Compactor) would otherwise keep failing on the
+        // dead storage until the CPU limit; a fresh instance resumes everything from storage.
+        console.error(`optchat: storage lost, discarding this instance: ${error.message}`)
+        this.ctx.abort(`storage lost: ${error.message}`)
+      },
+      onError: (error) => console.error(`optchat: ${describe(error)}`)
     }).then((app) => {
       app.subscribe((events) => this.broadcast({ type: "events", events }))
       return app
+    }, (error) => {
+      console.error(`optchat: open failed: ${describe(error)}`)
+      this.app = undefined
+      throw error
     })
     return this.app
   }
@@ -193,9 +203,17 @@ export class Chat extends DurableObject<Env> {
   }
 
   override async alarm() {
-    const app = await this.open()
-    await app.settle(ALARM_WORK_MS)
-    await this.heartbeat()
+    const started = Date.now()
+    try {
+      const app = await this.open()
+      const opened = Date.now()
+      await app.settle(ALARM_WORK_MS)
+      await this.heartbeat()
+      console.log(`optchat: alarm done (open ${opened - started} ms, settle ${Date.now() - opened} ms)`)
+    } catch (error) {
+      console.error(`optchat: alarm failed after ${Date.now() - started} ms: ${describe(error)}`)
+      throw error
+    }
   }
 }
 
@@ -205,3 +223,5 @@ const digest = async (text: string) =>
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("")
 
+const describe = (error: unknown) =>
+  error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ""}` : JSON.stringify(error)

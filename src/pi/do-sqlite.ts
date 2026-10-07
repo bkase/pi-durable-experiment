@@ -8,6 +8,16 @@ export interface DoStorage {
   transaction<T>(closure: (txn: unknown) => Promise<T>): Promise<T>
 }
 
+/**
+ * Errors after which this object's storage is gone for good (the instance was reset, e.g. by a
+ * deploy). Retrying is pointless; the instance must be discarded so a fresh one takes over.
+ */
+export const isFatalStorageError = (error: unknown): boolean =>
+  error instanceof Error &&
+  /Network connection lost|Durable Object reset|Durable Object storage is no longer|object to be reset|broken\.outputGateBroken/i.test(
+    error.message
+  )
+
 const toBinding = (value: SqliteValue): unknown => {
   if (typeof value === "bigint") {
     if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < BigInt(Number.MIN_SAFE_INTEGER)) return value.toString()
@@ -43,6 +53,15 @@ class Executor implements SqliteExecutor {
     private readonly guard: <T>(operation: () => T) => Promise<T>
   ) {}
 
+  protected static checked<T>(operation: () => T, onFatal: (error: Error) => void): T {
+    try {
+      return operation()
+    } catch (error) {
+      if (isFatalStorageError(error)) onFatal(error as Error)
+      throw error
+    }
+  }
+
   exec(sql: string): Promise<void> {
     return this.guard(() => {
       this.storage.sql.exec(sql).toArray()
@@ -77,9 +96,9 @@ export class DoSqliteDatabase extends Executor implements SqliteDatabase {
   private readonly lock: Lock
   private closed = false
 
-  constructor(storage: DoStorage) {
+  constructor(storage: DoStorage, private readonly onFatal: (error: Error) => void = () => {}) {
     const lock = new Lock()
-    super(storage, (operation) => lock.run(async () => operation()))
+    super(storage, (operation) => lock.run(async () => Executor.checked(operation, onFatal)))
     this.lock = lock
   }
 
@@ -90,7 +109,7 @@ export class DoSqliteDatabase extends Executor implements SqliteDatabase {
         let active = true
         const handle = new Executor(this.storage, async (operation) => {
           if (!active) throw new Error("SQLite transaction handle is no longer active")
-          return operation()
+          return Executor.checked(operation, this.onFatal)
         })
         try {
           return await callback(handle)
