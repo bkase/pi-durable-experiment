@@ -18,7 +18,10 @@ export const Worker = Cloudflare.Worker("OptChat", {
   env: {
     Chat: Cloudflare.DurableObject<Chat>("Chat"),
     LOADER: Cloudflare.WorkerLoader(),
-    OPTCHAT_TOKEN: Config.Redacted("OPTCHAT_TOKEN")
+    OPTCHAT_TOKEN: Config.Redacted("OPTCHAT_TOKEN"),
+    // "mock" (scripted models) until you've signed in with /login; then set MODEL_MODE=live in .env.
+    MODEL_MODE: Config.String("MODEL_MODE").pipe(Config.withDefault("mock")),
+    CACHE_MARKS: Config.String("CACHE_MARKS").pipe(Config.withDefault("off"))
   }
 })
 

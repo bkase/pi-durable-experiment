@@ -69,7 +69,7 @@ Webhooks: `curl -X POST -H "X-GitHub-Delivery: <id>" -d @payload.json https://�
 ## Real models
 
 1. In the CLI: `/login`, open the URL, sign in with ChatGPT; the browser then fails to load `127.0.0.1:1455/…` — copy that URL and send `/login <url>`. The credential stays in the Durable Object.
-2. Deploy with `MODEL_MODE=live` (Master `gpt-6.1-sol`, Compactor `gpt-6-luna`, `service_tier: priority`). `CACHE_MARKS=on` also sends the spec's explicit cache breakpoints, whose Responses API field names are unverified.
+2. Add `MODEL_MODE=live` to `.env` and `npm run deploy` (Master `gpt-6.1-sol`, Compactor `gpt-6-luna`, `service_tier: priority`). `CACHE_MARKS=on` also sends the spec's explicit cache breakpoints, whose Responses API field names are unverified.
 
 ## Tests
 
