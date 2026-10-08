@@ -23,7 +23,7 @@ The design was worked out interview-style first; the vocabulary is in [`CONTEXT.
 input ──► Chat Durable Object ──► reset() + submit ──► pi-durable generation
                                                           │ beforeRequest (OptChat extension)
                                                           ▼
-              [system: OptChat prompt + view doc + Standing Instructions + tools]   ← byte-identical every Run
+              [system: the one OptChat prompt + Standing Instructions + tools]     ← byte-identical every Run
               [user:   <chat> Memory View, frozen for this Run </chat> + the input]
               [this Run's own Turns: tool calls and results, append-only]
 
