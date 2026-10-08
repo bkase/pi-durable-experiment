@@ -3,7 +3,7 @@
 An experiment: **one endless chat with an agent that remembers everything**, running as a single always-on Cloudflare Durable Object.
 
 - **[pi-durable](https://www.npmjs.com/package/@earendil-works/pi-durable)** (pi 1.0) is the agent harness: Runs, tool calls and their checkpoints are committed before anything is shown, so a crashed or evicted object picks its work back up. Here it runs on the Durable Object's own SQLite.
-- **[OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449)** (Victor Taelin's design) is the memory: every message is kept verbatim, a cheap model compresses the history into a binary tree of one-line summaries, and every Run starts **fresh** from a fixed-size *Memory View* of the whole chat — recent messages one per line, older ones coarser. The agent `zoom`s into any line, down to the original message. No context rot, no compaction, constant cost.
+- **[OptChat / UniiChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449)** (Victor Taelin's design, following its 2026-10-08 revision) is the memory: every message is kept verbatim, a cheap model compresses the history into a binary tree of one-line summaries, and every Run starts **fresh** from a fixed-size *Memory View* of the whole chat — recent messages one per line, older ones coarser. The agent `zoom`s into any line, down to the original message. No context rot, no compaction, constant cost.
 - **[Effect v4](https://effect.website)** for the OptChat core, **[Alchemy v2](https://alchemy.run)** for infrastructure.
 - **[`@cloudflare/computer`](https://www.npmjs.com/package/@cloudflare/computer)** gives the agent a Workspace: a SQLite-backed filesystem in the same object and a bash-compatible shell ([just-bash](https://github.com/vercel-labs/just-bash)) running in a Dynamic Worker.
 
@@ -12,7 +12,7 @@ The design was worked out interview-style first; the vocabulary is in [`CONTEXT.
 ## What it does
 
 - **Chat** from a terminal client over a WebSocket; typing while the agent works steers the running Run.
-- **Remember** everything, forever, at a constant prompt size (the Memory View stays at ~128 KB / ~64k tokens however long the chat gets).
+- **Remember** everything, forever, at a constant prompt size: the Memory View stays between 64 and 128 KB however long the chat gets, and only grows at its end between rare batch rewrites, so nearly all of it is read from the prompt cache.
 - **React to the outside world**: webhooks (GitHub, Stripe, your deploys…) arrive as `event` messages — logged and answered, but never treated as the user's instructions.
 - **Work** in its Workspace: read, write, edit, find, grep files, and run shell pipelines with `curl` and `jq`.
 - **Survive** crashes, evictions and deploys mid-Run: an alarm heartbeat wakes the object and pi-durable resumes; a tool that may have half-run is reported to the model as interrupted, never silently re-run.
@@ -28,6 +28,7 @@ input ──► Chat Durable Object ──► reset() + submit ──► pi-dura
               [this Run's own Turns: tool calls and results, append-only]
 
 every committed entry ──► Projector ──► Log ──► Compactor ──► Summary Tree ──► Memory View
+compaction call: [same system prompt + tools as a turn] [<chat> Compaction View </chat>] [task with a 512-byte ruler]
 ```
 
 - The pi-durable transcript **is** the Log ([ADR 0001](docs/adr/0001-transcript-is-the-log.md)); the Projector turns entries into Log Messages (`user`, `talk`, `tool`, `echo`, `event`) and never logs model thinking.
@@ -96,7 +97,7 @@ Things learned the hard way:
 
 - **A Dynamic Worker outlives the Durable Object that started it.** After a deploy, a still-running shell command called back into a reset instance whose storage threw on every call; background work spun until the CPU limit and the object was unreachable for minutes. The adapter now treats lost storage as fatal and the object calls `ctx.abort()` ([ADR 0006](docs/adr/0006-discard-instances-whose-storage-is-gone.md)).
 - **pi-durable hooks can't read the transcript**, and pi-durable rebuilds the whole active context on every request — hence a `reset()` per Run.
-- **The Memory View behaves as the spec says** under simulation: it holds at its budget, and the prefix shared by consecutive Runs grows with history ([results](docs/experiments/memory-simulation.md)).
+- **The original spec's merge order thrashed the cache.** Measuring a pair's age from its first message and merging at every message meant consecutive Runs shared only 14–38% of the view. With the revised spec (age from the last message, sawtooth batches, a saved view, compactions sharing the turns' prefix) they share 94.7% in simulation, and the merge order matches Taelin's rollback push exactly ([results](docs/experiments/memory-simulation.md), [ADR 0007](docs/adr/0007-uniichat-cache-fixes.md)).
 
 Not yet verified: behaviour with real models, prompt-cache hit rates, and whether ChatGPT tokens get the priority tier.
 

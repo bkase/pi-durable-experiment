@@ -45,11 +45,19 @@ One line of the Summary Tree, named `id+n` for the `n` Log Messages it covers st
 _Avoid_: block, chunk
 
 **Memory View**:
-The list of Nodes that tiles the whole Log under a byte budget, coarser for older messages; it is the only history a Run sees.
+The list of Nodes that tiles the whole Log, coarser for older messages, kept between 64 and 128 KB; it is the only history a Run sees, and it is saved, never rebuilt.
 _Avoid_: view (collides with pi-durable's `viewState()`), context window
 
+**Batch**:
+The one moment the Memory View is rewritten: once it passes 128 KB, the most due pairs merge until it is at most 64 KB; otherwise lines are only appended.
+_Avoid_: compaction, refit
+
+**Compaction View**:
+The Memory View merged further (16–32 KB), which a Compactor call sees as context for the Node it builds.
+_Avoid_: compactor context, mini view
+
 **Compactor**:
-The background worker that builds Nodes of the Summary Tree with a cheap model.
+The background worker that builds Nodes of the Summary Tree with a cheap model, using the same system prompt and tools as a Run.
 _Avoid_: compaction (that is pi-durable's transcript-summarizing feature, which this system disables)
 
 **Zoom**:
