@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest"
 import { openApp } from "../../src/do/app.ts"
 import { ChatGPT } from "../../src/models/chatgpt.ts"
 import { MASTER_MODEL, MasterModels, mockCompactor, mockMaster, PROVIDER } from "../../src/models/models.ts"
-import { MASTER, VIEW_DOC } from "../../src/optchat/prompts.ts"
+import { SYSTEM } from "../../src/optchat/prompts.ts"
 import { nodeDoStorage } from "../support/node-do-storage.ts"
 
 /** Mock models that record every request the Master receives. */
@@ -45,8 +45,7 @@ describe("what the Master receives", () => {
       expect(system!.role).toBe("system")
       if (system!.role !== "system") throw new Error()
       const sections = Object.values(system!.sections ?? {}).join("\n")
-      expect(sections).toContain(MASTER)
-      expect(sections).toContain(VIEW_DOC)
+      expect(sections).toContain(SYSTEM)
       expect(sections).toContain("Call me Brandon.")
       expect((system!.toolsAdded ?? []).map((t) => t.name).sort()).toEqual(expect.arrayContaining(["date", "zoom"]))
       expect(rest.length).toBe(1)

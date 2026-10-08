@@ -1,17 +1,19 @@
 /** Target size of one summary line, in UTF-8 bytes. */
 export const NODE = 512
-/** Byte budget of the Memory View (≈ 62-64k tokens). */
-export const VIEW = 128_000
+/** The Memory View is a sawtooth: it grows to VIEW_HIGH bytes, then one batch merges it to VIEW_LOW. */
+export const VIEW_HIGH = 128_000
+export const VIEW_LOW = 64_000
+/** A compaction's view: the chat's view merged further, with the same sawtooth. */
+export const COMPACT_HIGH = 32_000
+export const COMPACT_LOW = 16_000
 /** Compactor calls running at once. */
 export const JOBS = 8
+/** A message's node starts once fewer than this many lines before it are still unbuilt. */
+export const LEAF_LAG = 8
 /** Attempts per Node to get under NODE. */
 export const TRIES = 5
-/** Wait before retrying a failed Node, in milliseconds. */
-export const RETRY_MS = 10_000
-/** Max size of one tool result in the Log, in characters (head + tail kept). */
+/** Max size of one tool result in the Log, in characters (head + tail kept). Other long texts are split. */
 export const CAP = 30_000
-/** Cache breakpoints inside the rendered Memory View, in characters. */
-export const MARKS = [50_000, 80_000, 100_000] as const
 
 export const PLACEHOLDER = "(not summarized yet: zoom it)"
 

@@ -1,45 +1,58 @@
-import { Context, Deferred, Duration, Effect, FiberSet, Layer, Schema, Semaphore } from "effect"
-import { bytes, JOBS, NODE, RETRY_MS, TRIES } from "./constants.ts"
-import { line, type LogMessage, type LogMeta } from "./log.ts"
-import { COMPACT, SCALE } from "./prompts.ts"
+import { Context, Deferred, Effect, FiberSet, Layer, Schema, Semaphore } from "effect"
+import { bytes, COMPACT_HIGH, COMPACT_LOW, JOBS, LEAF_LAG, NODE, TRIES } from "./constants.ts"
+import { line, type LogMeta } from "./log.ts"
+import { compressTask, mergeTask, tooLong } from "./prompts.ts"
 import { type LogDraft, OptChatStore } from "./store.ts"
-import { freeLeaf, freeMerge, key, makeNode, type Node, NodeIndex, parseName, span, start } from "./tree.ts"
-import { MemoryView, renderPieces } from "./view.ts"
+import { freeLeaf, freeMerge, key, makeNode, name, type Node, NodeIndex, parseName, span } from "./tree.ts"
+import { MemoryView, renderPieces, type ViewState } from "./view.ts"
 
 export class ModelError extends Schema.TaggedError<ModelError>()("ModelError", {
   message: Schema.String
 }) {}
 
-/** One message of a Compactor conversation; `content` is its text blocks. */
+/** One message of a compaction conversation after its view; `content` is its text blocks. */
 export interface CompactorTurn {
   readonly role: "user" | "assistant"
   readonly content: ReadonlyArray<string>
 }
 
-/** The cheap model that writes Summary Tree nodes. No tools; one conversation per node. */
+/**
+ * One compaction call: `[tools] [system prompt] [<chat> compaction view </chat>] [task …]`. The
+ * model layer supplies the turns' own tools and system prompt, so compactions read them from the
+ * turns' cache entry (UniiChat spec §4).
+ */
+export interface CompactionRequest {
+  readonly view: ReadonlyArray<string>
+  readonly turns: ReadonlyArray<CompactorTurn>
+}
+
+/** The cheap model that writes Summary Tree nodes. It is given the turns' tools but must call none. */
 export class CompactorModel extends Context.Service<CompactorModel, {
-  readonly complete: (system: string, turns: ReadonlyArray<CompactorTurn>) => Effect.Effect<string, ModelError>
+  readonly complete: (request: CompactionRequest) => Effect.Effect<string, ModelError>
 }>()("optchat/CompactorModel") {}
 
 export interface MemoryStatus {
   readonly T: number
   readonly viewBytes: number
   readonly viewLines: number
+  readonly compactionViewBytes: number
   readonly nodes: number
   readonly busy: number
   readonly failing: number
   /** First message whose view line is not yet a summary (T when settled). */
   readonly first: number
+  /** Batches the chat view has run since this instance started (each rewrites the view once). */
+  readonly batches: number
 }
 
 /** The OptChat memory: the Log, the Summary Tree, the Memory View and the Compactor that builds it. */
 export class Memory extends Context.Service<Memory, {
   /** Log new messages (idempotent per transcript entry part) and wake the Compactor. */
-  readonly append: (drafts: ReadonlyArray<LogDraft>) => Effect.Effect<ReadonlyArray<LogMessage>>
+  readonly append: (drafts: ReadonlyArray<LogDraft>) => Effect.Effect<ReadonlyArray<LogMeta>>
   readonly count: Effect.Effect<number>
   /** Resolves once every view line covering messages before `end` is a summary. */
   readonly settle: (end: number) => Effect.Effect<void>
-  /** The `<chat>` block covering messages before `end`, cut at the cache marks. */
+  /** The `<chat>` block covering messages before `end`, in cacheable pieces. */
   readonly render: (end: number) => Effect.Effect<ReadonlyArray<string>>
   readonly zoom: (id: number, n: number) => Effect.Effect<string>
   readonly date: (id: number) => Effect.Effect<string>
@@ -68,134 +81,171 @@ const make = Effect.gen(function*() {
   const index = new NodeIndex()
   for (const node of yield* store.nodes) index.put(node)
   const messages: LogMeta[] = [...(yield* store.metas)]
-  const view = MemoryView.fold(index, messages.length)
 
-  const busy = new Set<string>()
-  const failing = new Set<string>()
+  // The views are kept, never rebuilt: a rebuilt view differs from the live one and every cache
+  // entry dies. Only a Log that never had a saved view (or lost its tail) is folded forward.
+  const restore = (saved: ViewState | undefined, high?: number, low?: number) => {
+    const view = saved === undefined ? new MemoryView(index, high, low) : MemoryView.restore(index, saved, high, low)
+    for (let i = view.T; i < messages.length; i++) view.append(i)
+    return view
+  }
+  const view = restore(yield* store.loadView("chat"))
+  const savedCompact = yield* store.loadView("compact")
+  const compact = savedCompact === undefined
+    ? new MemoryView(index, COMPACT_HIGH, COMPACT_LOW)
+    : restore(savedCompact, COMPACT_HIGH, COMPACT_LOW)
+  if (savedCompact === undefined) compact.resetFrom(view)
+  let batches = 0
+
+  const saveViews = Effect.all([store.saveView("chat", view.save()), store.saveView("compact", compact.save())], {
+    discard: true
+  })
+
+  // Work queues (spec §4: never scan the tree for work).
+  const inflight = new Set<string>()
+  const failed = new Map<string, readonly [number, number]>()
+  const mergeQueue: Array<readonly [number, number]> = []
+  const queued = new Set<string>()
+  let nextLeaf = 0
+  const advanceLeaf = () => {
+    while (nextLeaf < messages.length && index.has(0, nextLeaf)) nextLeaf++
+  }
+  const enqueueParent = (l: number, i: number) => {
+    const sibling = i % 2 === 0 ? i + 1 : i - 1
+    const pl = l + 1
+    const pi = Math.floor(i / 2)
+    if (!index.has(l, sibling) || index.has(pl, pi) || queued.has(key(pl, pi))) return
+    queued.add(key(pl, pi))
+    mergeQueue.push([pl, pi])
+  }
+  for (const node of [...index.all()]) enqueueParent(node.l, node.i)
+  advanceLeaf()
+
   let settleWaiters: Array<{ end: number; done: Deferred.Deferred<void> }> = []
   let idleWaiters: Array<Deferred.Deferred<void>> = []
-
   const notify = Effect.sync(() => {
     const ready = settleWaiters.filter((w) => view.settledBefore(w.end))
     settleWaiters = settleWaiters.filter((w) => !view.settledBefore(w.end))
-    const idle = busy.size === 0 ? idleWaiters : []
-    if (busy.size === 0) idleWaiters = []
+    const idle = inflight.size === 0 ? idleWaiters : []
+    if (inflight.size === 0) idleWaiters = []
     return [...ready.map((w) => w.done), ...idle]
   }).pipe(Effect.flatMap((ds) => Effect.forEach(ds, (d) => Deferred.succeed(d, undefined), { discard: true })))
 
   const T = () => messages.length
 
-  /** View lines before `end`, bare: text only, no ids (the Compactor would copy them). */
-  const contextBlock = (end: number): string => {
-    const lines: string[] = []
-    for (const part of view.lines) {
-      if (start(part.l, part.i) >= end) break
-      const node = index.get(part.l, part.i)
-      if (node !== undefined) lines.push(flat(node.text))
-    }
-    return `<chat>\n${lines.map((l) => `${l}\n`).join("")}</chat>`
-  }
-
-  const ask = Effect.fnUntraced(function*(context: string, step: string) {
-    const turns: CompactorTurn[] = [{ role: "user", content: [context, step] }]
+  const ask = Effect.fnUntraced(function*(end: number, task: string) {
+    const context = renderPieces(compact.contextLines(end))
+    const turns: CompactorTurn[] = [{ role: "user", content: [task] }]
     const tries: string[] = []
     while (true) {
-      const reply = (yield* model.complete(COMPACT, turns)).trim()
+      const reply = (yield* model.complete({ view: context, turns })).trim().replace(/^\d+\+\d+\|/, "")
       if (reply.length === 0) return yield* new ModelError({ message: "empty compactor reply" })
       tries.push(reply)
       const size = bytes(reply)
       if (size <= NODE || tries.length >= TRIES) break
-      turns.push({ role: "assistant", content: [reply] })
-      turns.push({
+      turns.push({ role: "assistant", content: [reply] }, {
         role: "user",
-        content: [
-          `That line is ${size} bytes; the limit is ${NODE}. It must end where it is cut here:\n${
-            cutBytes(reply, NODE)
-          }| ← LIMIT`
-        ]
+        content: [tooLong(size, cutBytes(reply, NODE))]
       })
     }
     return tries.reduce((a, b) => (bytes(b) < bytes(a) ? b : a))
   })
-
-  const scale = `For scale, this line is exactly ${NODE} bytes:\n${SCALE}\n\n`
 
   const build = Effect.fnUntraced(function*(l: number, i: number) {
     if (l === 0) {
       const message = (yield* store.message(i))!
       const free = freeLeaf(message)
       if (free !== undefined) return free
-      const step = `${scale}Compress this message into one line, in at most ${NODE} bytes:\n${
-        line(message.kind, message.text)
-      }`
-      return makeNode(0, i, yield* ask(contextBlock(i), step))
+      return makeNode(0, i, yield* ask(i, compressTask(i, message.kind, message.text)))
     }
     const a = index.get(l - 1, 2 * i)!
     const b = index.get(l - 1, 2 * i + 1)!
     const free = freeMerge(l, i, a, b)
     if (free !== undefined) return free
-    const step = `${scale}Merge these two lines into one, in at most ${NODE} bytes:\n${flat(a.text)}\n${flat(b.text)}`
-    return makeNode(l, i, yield* ask(contextBlock((i + 1) * span(l)), step))
+    const first = i * span(l)
+    const end = (i + 1) * span(l)
+    return makeNode(
+      l,
+      i,
+      yield* ask(
+        end,
+        mergeTask(`${name(l - 1, 2 * i)}|${flat(a.text)}`, `${name(l - 1, 2 * i + 1)}|${flat(b.text)}`, first, end - 1)
+      )
+    )
   })
-
-  const save = (node: Node) =>
-    Effect.gen(function*() {
-      yield* store.putNode(node)
-      index.put(node)
-      view.built()
-    })
 
   const job = (l: number, i: number): Effect.Effect<void> =>
     build(l, i).pipe(
-      Effect.flatMap(save),
-      Effect.flatMap(() =>
-        Effect.sync(() => {
-          busy.delete(key(l, i))
-          failing.delete(key(l, i))
+      Effect.flatMap((node: Node) =>
+        Effect.gen(function*() {
+          yield* store.putNode(node)
+          index.put(node)
+          view.built()
+          compact.built()
+          enqueueParent(l, i)
+          if (l === 0) advanceLeaf()
         })
       ),
       Effect.catch((error: ModelError) =>
         Effect.gen(function*() {
-          if (!failing.has(key(l, i))) {
-            failing.add(key(l, i))
-            yield* Effect.logWarning(`compactor: node ${l}:${i} failed: ${error.message}`)
-          }
-          yield* Effect.sleep(Duration.millis(RETRY_MS))
-          busy.delete(key(l, i))
+          // Tried again at the next message (spec §4), not on a timer.
+          yield* Effect.logWarning(`compactor: node ${l}:${i} failed: ${error.message}`)
+          failed.set(key(l, i), [l, i])
         })
       ),
+      Effect.ensuring(Effect.sync(() => inflight.delete(key(l, i)))),
       Effect.andThen(notify),
       Effect.andThen(Effect.suspend(() => pump))
     )
 
-  /** Start every node that is unbuilt, idle, has its sources, and whose whole context is summarized. */
+  /** Start ready work up to JOBS: merges whose halves are built, then the next messages in order. */
   const pump: Effect.Effect<void> = Effect.suspend(() => {
-    const starts: Array<[number, number]> = []
-    const total = T()
-    const first = view.first()
-    outer: for (let l = 0; span(l) <= total; l++) {
-      for (let i = 0; (i + 1) * span(l) <= total; i++) {
-        if (busy.size >= JOBS) break outer
-        if (index.has(l, i) || busy.has(key(l, i))) continue
-        if (l > 0 && (!index.has(l - 1, 2 * i) || !index.has(l - 1, 2 * i + 1))) continue
-        const end = l === 0 ? i : (i + 1) * span(l)
-        if (end > first) continue
-        busy.add(key(l, i))
-        starts.push([l, i])
-      }
+    const starts: Array<readonly [number, number]> = []
+    const take = (l: number, i: number) => {
+      inflight.add(key(l, i))
+      starts.push([l, i])
+    }
+    while (inflight.size < JOBS && mergeQueue.length > 0) {
+      const [l, i] = mergeQueue.shift()!
+      queued.delete(key(l, i))
+      if (!index.has(l, i) && !inflight.has(key(l, i)) && !failed.has(key(l, i))) take(l, i)
+    }
+    while (inflight.size < JOBS && nextLeaf < T() && view.unbuiltBefore(nextLeaf) < LEAF_LAG) {
+      const i = nextLeaf++
+      if (!index.has(0, i) && !inflight.has(key(0, i)) && !failed.has(key(0, i))) take(0, i)
     }
     return Effect.forEach(starts, ([l, i]) => FiberSet.run(fibers, job(l, i)), { discard: true })
+  })
+
+  /** Failed nodes go back in line when the next message arrives. */
+  const retryFailed = Effect.sync(() => {
+    for (const [k, [l, i]] of failed) {
+      failed.delete(k)
+      if (l === 0) nextLeaf = Math.min(nextLeaf, i)
+      else if (!queued.has(k)) {
+        queued.add(k)
+        mergeQueue.unshift([l, i])
+      }
+    }
   })
 
   const append = (drafts: ReadonlyArray<LogDraft>) =>
     Effect.gen(function*() {
       const added = yield* store.append(drafts)
-      for (const { text: _, ...meta } of added) {
+      if (added.length === 0) return []
+      yield* retryFailed
+      const metas = added.map(({ text: _, ...meta }) => meta)
+      for (const meta of metas) {
         messages.push(meta)
-        view.append(meta.i)
+        if (view.append(meta.i) > 0) {
+          // A chat batch: the compaction view is the chat view merged further, so it follows.
+          batches++
+          compact.resetFrom(view)
+        } else compact.append(meta.i)
       }
-      if (added.length > 0) yield* pump
-      return added
+      yield* saveViews
+      yield* pump
+      return metas
     }).pipe(Semaphore.withPermits(appending, 1))
 
   const settle = (end: number) =>
@@ -221,14 +271,8 @@ const make = Effect.gen(function*() {
       return `${id}+${half}|${flat(a.text)}\n${id + half}+${half}|${flat(b.text)}`
     })
 
-  const date = (id: number) =>
-    Effect.sync(() => {
-      const m = messages[id]
-      return m === undefined ? `No message ${id}.` : m.date
-    })
-
   const idle = Effect.gen(function*() {
-    if (busy.size === 0) return
+    if (inflight.size === 0) return
     const done = yield* Deferred.make<void>()
     idleWaiters.push(done)
     yield* Deferred.await(done)
@@ -242,15 +286,17 @@ const make = Effect.gen(function*() {
     settle,
     render: (end) => Effect.sync(() => renderPieces(view.renderLines(end))),
     zoom,
-    date,
+    date: (id) => Effect.sync(() => messages[id]?.date ?? `No message ${id}.`),
     status: Effect.sync(() => ({
       T: T(),
       viewBytes: view.size,
       viewLines: view.lines.length,
+      compactionViewBytes: compact.size,
       nodes: index.size,
-      busy: busy.size,
-      failing: failing.size,
-      first: view.first()
+      busy: inflight.size,
+      failing: failed.size,
+      first: view.first(),
+      batches
     })),
     idle
   })

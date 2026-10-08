@@ -1,3 +1,4 @@
+import { CAP } from "./constants.ts"
 import { cap, type Kind } from "./log.ts"
 import type { LogDraft } from "./store.ts"
 
@@ -50,7 +51,7 @@ export const projectEntry = (entry: ProjectableEntry, eventSource?: string): Log
     switch (message.role) {
       case "user": {
         const text = textOf(message.content)
-        if (eventSource !== undefined) out.push({ kind: "event", text: `[${eventSource}] ${cap(text)}`, timestamp: message.timestamp })
+        if (eventSource !== undefined) out.push({ kind: "event", text: `[${eventSource}] ${text}`, timestamp: message.timestamp })
         else out.push({ kind: "user", text, timestamp: message.timestamp })
         break
       }
@@ -91,7 +92,15 @@ export const projectEntry = (entry: ProjectableEntry, eventSource?: string): Log
         break
     }
   }
-  return out.map((m, part) => ({
+  // Tool results are clipped (head and tail); any other long text is never cut: it is logged as
+  // several messages in a row (UniiChat spec §1).
+  const pages = out.flatMap((m) => {
+    if (m.kind === "echo" || m.text.length <= CAP) return [m]
+    const chunks: typeof out = []
+    for (let k = 0; k < m.text.length; k += CAP) chunks.push({ ...m, text: m.text.slice(k, k + CAP) })
+    return chunks
+  })
+  return pages.map((m, part) => ({
     entryId: String(entry.id),
     part,
     kind: m.kind,

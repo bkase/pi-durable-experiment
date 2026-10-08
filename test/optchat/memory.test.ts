@@ -1,7 +1,7 @@
 import { assert, describe, it } from "@effect/vitest"
 import { Effect, Layer } from "effect"
-import { bytes, NODE } from "../../src/optchat/constants.ts"
-import { CompactorModel, Memory, ModelError } from "../../src/optchat/memory.ts"
+import { RULER } from "../../src/optchat/prompts.ts"
+import { type CompactionRequest, CompactorModel, Memory, ModelError } from "../../src/optchat/memory.ts"
 import { OptChatStore, type LogDraft } from "../../src/optchat/store.ts"
 
 const date = "2026-10-06T00:00:00.000Z"
@@ -13,19 +13,15 @@ const draft = (entryId: string, text: string, kind: LogDraft["kind"] = "user"): 
   date
 })
 
-interface Call {
-  readonly system: string
-  readonly turns: ReadonlyArray<{ role: string; content: ReadonlyArray<string> }>
-}
+type Call = CompactionRequest
 
-/** A Compactor that answers with a short line naming what it saw, recording every call. */
+/** A Compactor that answers with a fixed line, recording every call. */
 const recordingCompactor = (calls: Call[], reply: (call: Call) => string = () => "summary") =>
   Layer.succeed(CompactorModel)({
-    complete: (system, turns) =>
+    complete: (request) =>
       Effect.sync(() => {
-        const call = { system, turns }
-        calls.push(call)
-        return reply(call)
+        calls.push({ view: [...request.view], turns: request.turns.map((t) => ({ ...t, content: [...t.content] })) })
+        return reply(request)
       })
   })
 
@@ -46,20 +42,19 @@ describe("Memory", () => {
     }).pipe(Effect.provide(memoryWith(recordingCompactor(calls))))
   })
 
-  it.effect("long messages are compressed with the view as context and no ids", () => {
+  it.effect("long messages are compressed with the compaction view as context and the ruler task", () => {
     const calls: Call[] = []
     return Effect.gen(function*() {
       const memory = yield* Memory
       yield* memory.append([draft("a", "short one"), draft("b", "x".repeat(2000))])
       yield* memory.settle(2)
       assert.strictEqual(calls.length, 1)
-      const [context, step] = calls[0]!.turns[0]!.content
-      assert.strictEqual(context, "<chat>\nuser: short one\n</chat>")
-      assert.isTrue(step!.startsWith(`For scale, this line is exactly ${NODE} bytes:`))
-      assert.include(step!, "Compress this message into one line")
-      assert.notInclude(step!, "1+1|")
-      const lines = (yield* memory.render(2)).join("")
-      assert.include(lines, "1+1|summary")
+      assert.deepStrictEqual(calls[0]!.view, ["<chat>\n0+1|user: short one\n</chat>"])
+      const task = calls[0]!.turns[0]!.content[0]!
+      assert.isTrue(task.startsWith("Compaction: compress message 1 into one line of at most 512 bytes"))
+      assert.include(task, RULER)
+      assert.include(task, `<input>\nuser: ${"x".repeat(2000)}\n</input>`)
+      assert.include((yield* memory.render(2)).join(""), "1+1|summary")
     }).pipe(Effect.provide(memoryWith(recordingCompactor(calls))))
   })
 
@@ -73,26 +68,43 @@ describe("Memory", () => {
       assert.strictEqual(calls.length, 5)
       const last = calls[4]!.turns
       assert.strictEqual(last.length, 9)
-      assert.include(last[2]!.content[0]!, "That line is 700 bytes; the limit is 512.")
+      assert.include(last[2]!.content[0]!, "Too long: your line is 700 bytes, over the 512-byte limit.")
       assert.include(last[2]!.content[0]!, "| ← LIMIT")
-      const zoomed = yield* memory.render(1)
-      assert.include(zoomed.join(""), `0+1|${"y".repeat(515)}`)
+      assert.include((yield* memory.render(1)).join(""), `0+1|${"y".repeat(515)}`)
     }).pipe(Effect.provide(memoryWith(recordingCompactor(calls, () => replies[calls.length - 1]!))))
   })
 
-  it.effect("merges into parents and keeps the view under budget", () => {
+  it.effect("merges see lines up to their last message and name the lines they merge", () => {
     const calls: Call[] = []
     return Effect.gen(function*() {
       const memory = yield* Memory
-      const drafts = Array.from({ length: 600 }, (_, k) => draft(`e${k}`, `message ${k} `.padEnd(400, ".")))
-      yield* memory.append(drafts)
-      yield* memory.settle(600)
+      yield* memory.append([draft("a", "p".repeat(600)), draft("b", "q".repeat(600))])
+      yield* memory.settle(2)
       yield* memory.idle
+      const merge = calls.find((c) => c.turns[0]!.content[0]!.startsWith("Compaction: merge"))!
+      assert.include(merge.turns[0]!.content[0]!, "Compaction: merge lines 0+1 and 1+1, adjacent")
+      assert.include(merge.turns[0]!.content[0]!, "<chat> may hold their messages, 0 to 1, in more detail")
+      const L = "L".repeat(300)
+      assert.deepStrictEqual(merge.view, [`<chat>\n0+1|${L}\n1+1|${L}\n</chat>`])
+    }).pipe(Effect.provide(memoryWith(recordingCompactor(calls, () => "L".repeat(300)))))
+  })
+
+  it.effect("merges into parents in batches and keeps the view under its high mark", () => {
+    const calls: Call[] = []
+    return Effect.gen(function*() {
+      const memory = yield* Memory
+      let peak = 0
+      for (let k = 0; k < 1200; k++) {
+        yield* memory.append([draft(`e${k}`, `message ${k} `.padEnd(400, "."))])
+        yield* memory.idle
+        peak = Math.max(peak, (yield* memory.status).viewBytes)
+      }
       const status = yield* memory.status
-      assert.strictEqual(status.T, 600)
-      assert.strictEqual(status.first, 600)
-      assert.isTrue(status.viewBytes <= 128_000)
-      for (const call of calls) assert.isTrue(bytes(call.turns[0]!.content[0]!) > 0)
+      assert.strictEqual(status.T, 1200)
+      assert.strictEqual(status.first, 1200)
+      assert.isTrue(status.batches > 0)
+      assert.isTrue(peak <= 128_000 + 600, `peak ${peak}`)
+      assert.isTrue(status.compactionViewBytes <= 32_000 + 600, `compaction view ${status.compactionViewBytes}`)
     }).pipe(Effect.provide(memoryWith(recordingCompactor(calls, () => "m".repeat(300)))))
   })
 
@@ -105,19 +117,23 @@ describe("Memory", () => {
       assert.strictEqual(yield* memory.count, 2)
     }).pipe(Effect.provide(memoryWith(recordingCompactor([])))))
 
-  it.live("retries a failing node until it succeeds", () => {
+  it.effect("retries a failed node when the next message arrives", () => {
     let failures = 2
     const flaky = Layer.succeed(CompactorModel)({
-      complete: () =>
-        failures-- > 0 ? Effect.fail(new ModelError({ message: "rate limited" })) : Effect.succeed("ok")
+      complete: () => (failures-- > 0 ? Effect.fail(new ModelError({ message: "rate limited" })) : Effect.succeed("ok"))
     })
     return Effect.gen(function*() {
       const memory = yield* Memory
       yield* memory.append([draft("a", "q".repeat(1000))])
+      yield* memory.idle
+      assert.strictEqual((yield* memory.status).failing, 1)
+      yield* memory.append([draft("b", "next")])
+      yield* memory.idle
+      yield* memory.append([draft("c", "and next")])
       yield* memory.settle(1)
       assert.include((yield* memory.render(1)).join(""), "0+1|ok")
     }).pipe(Effect.provide(memoryWith(flaky)))
-  }, { timeout: 40_000 })
+  })
 
   it.effect("rejects bad zooms", () =>
     Effect.gen(function*() {

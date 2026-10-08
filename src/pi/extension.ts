@@ -2,7 +2,8 @@ import { Type } from "@earendil-works/pi-ai"
 import type { Context } from "@earendil-works/chord"
 import type { ConversationId, EntryId, EntryRecord } from "@earendil-works/pi-durable"
 import { defineExtension, defineTool, GenerationTask, hook, section } from "@earendil-works/pi-durable"
-import { MASTER, VIEW_DOC } from "../optchat/prompts.ts"
+import type { SystemMessage } from "@earendil-works/pi-ai"
+import { SYSTEM } from "../optchat/prompts.ts"
 import { rewriteRequest } from "./rewrite.ts"
 
 /** What the OptChat extension needs from the memory, in Promise form (see bridge.ts). */
@@ -13,6 +14,8 @@ export interface OptChatBridge {
   readonly project: (entries: ReadonlyArray<EntryRecord>) => Promise<void>
   /** The Memory View frozen for the Run whose first input is `entryId`: settles and renders it once. */
   readonly runView: (entryId: EntryId, signal: AbortSignal | undefined) => Promise<ReadonlyArray<string>>
+  /** The system message (prompt, Standing Instructions and tools) a turn just sent: compactions reuse it. */
+  readonly prefix: (system: SystemMessage) => Promise<void>
   readonly zoom: (id: number, n: number) => Promise<string>
   readonly date: (id: number) => Promise<string>
 }
@@ -56,10 +59,8 @@ export const makeOptChatExtension = (bridge: OptChatBridge) => {
   return defineExtension({
     name: "optchat",
     tools: [zoom, date],
-    sections: [
-      section("master", () => MASTER, { tag: false }),
-      section("view", () => VIEW_DOC, { tag: false })
-    ],
+    // One prompt for turns and compactions (UniiChat spec §5); Standing Instructions follow it.
+    sections: [section("prompt", () => SYSTEM, { tag: false })],
     hooks: [
       hook(GenerationTask, {
         beforeRequest: async (request, api, context) => {
@@ -68,7 +69,9 @@ export const makeOptChatExtension = (bridge: OptChatBridge) => {
           const input = runInput(entries)
           if (input === undefined) return undefined
           const pieces = await bridge.runView(input.id, context.abortSignal)
-          return { messages: rewriteRequest(request.messages, pieces) }
+          const messages = rewriteRequest(request.messages, pieces)
+          if (messages[0]?.role === "system") await bridge.prefix(messages[0])
+          return { messages }
         }
       })
     ]

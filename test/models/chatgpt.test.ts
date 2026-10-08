@@ -96,10 +96,10 @@ describe("shapePayload", () => {
     assert.isUndefined(out.reasoning)
   })
 
-  it("marks only the Memory View pieces when explicit marks are on", () => {
+  it("marks only the last whole block of the Memory View when explicit marks are on", () => {
     const out = shapePayload({ serviceTier: "priority", explicitCacheMarks: true })(payload()) as any
     const parts = out.input[0].content
-    assert.deepStrictEqual(parts.map((p: any) => p.prompt_cache_breakpoint === true), [true, true, false])
+    assert.deepStrictEqual(parts.map((p: any) => p.prompt_cache_breakpoint === true), [true, false, false])
     assert.strictEqual(out.reasoning.context, "all_turns")
   })
 })

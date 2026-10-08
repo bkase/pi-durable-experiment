@@ -1,6 +1,7 @@
 import { Context, Effect, Layer } from "effect"
 import { type Kind, type LogMessage, type LogMeta, sizeOf } from "./log.ts"
 import type { Node } from "./tree.ts"
+import type { ViewState } from "./view.ts"
 
 /** A Log Message before it has an id: where it came from in the pi-durable transcript. */
 export interface LogDraft {
@@ -33,6 +34,9 @@ export interface OptChatStoreShape {
   /** The Memory View text frozen for a Run, keyed by the Run's first input entry. */
   readonly runView: (entryId: string) => Effect.Effect<ReadonlyArray<string> | undefined>
   readonly putRunView: (entryId: string, pieces: ReadonlyArray<string>) => Effect.Effect<void>
+  /** The saved views ("chat" and "compact"): kept across restarts, never rebuilt from the Log. */
+  readonly loadView: (name: string) => Effect.Effect<ViewState | undefined>
+  readonly saveView: (name: string, state: ViewState) => Effect.Effect<void>
 }
 
 export class OptChatStore extends Context.Service<OptChatStore, OptChatStoreShape>()("optchat/OptChatStore") {
@@ -43,6 +47,7 @@ export class OptChatStore extends Context.Service<OptChatStore, OptChatStoreShap
     const firsts = new Map<string, number>()
     const nodes = new Map<string, Node>()
     const runViews = new Map<string, ReadonlyArray<string>>()
+    const views = new Map<string, ViewState>()
     return OptChatStore.of({
       append: (drafts) =>
         Effect.sync(() => {
@@ -66,7 +71,9 @@ export class OptChatStore extends Context.Service<OptChatStore, OptChatStoreShap
       putNode: (node) => Effect.sync(() => void nodes.set(`${node.l}:${node.i}`, node)),
       nodes: Effect.sync(() => [...nodes.values()]),
       runView: (entryId) => Effect.sync(() => runViews.get(entryId)),
-      putRunView: (entryId, pieces) => Effect.sync(() => void runViews.set(entryId, pieces))
+      putRunView: (entryId, pieces) => Effect.sync(() => void runViews.set(entryId, pieces)),
+      loadView: (name) => Effect.sync(() => views.get(name)),
+      saveView: (name, state) => Effect.sync(() => void views.set(name, state))
     })
   })
 }

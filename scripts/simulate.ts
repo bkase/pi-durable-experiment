@@ -16,10 +16,11 @@ const counting = Layer.effect(
   Effect.gen(function*() {
     const inner = yield* CompactorModel
     return CompactorModel.of({
-      complete: (system, turns) => Effect.suspend(() => {
-        compactorCalls++
-        return inner.complete(system, turns)
-      })
+      complete: (request) =>
+        Effect.suspend(() => {
+          compactorCalls++
+          return inner.complete(request)
+        })
     })
   })
 ).pipe(Layer.provide(mockCompactor))
@@ -28,6 +29,7 @@ const program = Effect.gen(function*() {
   const memory = yield* Memory
   let previous = ""
   const shared: number[] = []
+  const reads: number[] = []
   for (let k = 0; k < N; k++) {
     const kind = kinds[k % kinds.length]!
     const draft: LogDraft = {
@@ -40,23 +42,29 @@ const program = Effect.gen(function*() {
     yield* memory.append([draft])
     if (kind === "user") {
       yield* memory.settle(k + 1)
-      const view = (yield* memory.render(k)).join("")
+      const pieces = yield* memory.render(k)
+      const view = pieces.join("")
       let p = 0
       while (p < previous.length && p < view.length && previous[p] === view[p]) p++
-      if (previous.length > 0) shared.push(p)
+      if (previous.length > 0) {
+        shared.push(p)
+        reads.push(p / view.length)
+      }
       previous = view
     }
     if ((k + 1) % 1000 === 0 || k + 1 === N) {
       yield* memory.settle(k + 1)
       const s = yield* memory.status
-      const recent = shared.slice(-50)
+      const recent = shared.slice(-125)
       const avg = recent.reduce((a, b) => a + b, 0) / Math.max(1, recent.length)
+      const recentReads = reads.slice(-125)
+      const hit = recentReads.reduce((a, b) => a + b, 0) / Math.max(1, recentReads.length)
       console.log(
         `T=${String(s.T).padStart(6)}  view=${(s.viewBytes / 1000).toFixed(1).padStart(6)} KB  lines=${
           String(s.viewLines).padStart(4)
-        }  nodes=${String(s.nodes).padStart(6)}  compactor calls/msg=${(compactorCalls / s.T).toFixed(2)}  shared prefix (last 50 runs)=${
-          (avg / 1000).toFixed(1)
-        }k chars of ${(previous.length / 1000).toFixed(1)}k`
+        }  compactor calls/msg=${(compactorCalls / s.T).toFixed(2)}  batches=${String(s.batches).padStart(3)}  view reused from the previous Run (last 125 Runs)=${
+          (100 * hit).toFixed(1)
+        }% (${(avg / 1000).toFixed(1)}k chars)`
       )
     }
   }

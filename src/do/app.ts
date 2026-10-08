@@ -13,7 +13,7 @@ import { createRegistry, Harness } from "@earendil-works/pi-durable"
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite"
 import { Effect, Layer, ManagedRuntime } from "effect"
 import { ChatGPT, type KeyValue } from "../models/chatgpt.ts"
-import { MasterModels } from "../models/models.ts"
+import { MasterModels, TurnPrefix } from "../models/models.ts"
 import { type CompactorModel, Memory, type MemoryStatus } from "../optchat/memory.ts"
 import { LOGGED_KINDS, projectEntry } from "../optchat/projector.ts"
 import { OptChatStore } from "../optchat/store.ts"
@@ -64,7 +64,7 @@ export interface AppOptions {
   readonly workspace: Workspace
   readonly exec: boolean
   /** Model access over the DO's key-value store: mock models, or the live ChatGPT-backed layer. */
-  readonly models: (kv: KeyValue) => Layer.Layer<MasterModels | CompactorModel | ChatGPT>
+  readonly models: (kv: KeyValue) => Layer.Layer<MasterModels | CompactorModel | ChatGPT, never, TurnPrefix>
   readonly onError: (error: unknown) => void
   /** This object's storage is gone (the instance was reset): discard the instance. */
   readonly onFatal?: (error: Error) => void
@@ -87,10 +87,10 @@ export const openApp = async (options: AppOptions): Promise<App> => {
   }
   const layer = Memory.layer.pipe(
     Layer.provideMerge(doOptChatStore(db)),
-    Layer.provideMerge(options.models(kv))
+    Layer.provideMerge(options.models(kv).pipe(Layer.provideMerge(TurnPrefix.layer(kv))))
   )
   const runtime = ManagedRuntime.make(layer)
-  type Services = Memory | OptChatStore | MasterModels | CompactorModel | ChatGPT
+  type Services = Memory | OptChatStore | MasterModels | CompactorModel | ChatGPT | TurnPrefix
   const run = <A, E = never>(effect: Effect.Effect<A, E, Services>) => runtime.runPromise(effect)
   const memory = await run(Effect.gen(function*() {
     return yield* Memory
@@ -103,6 +103,9 @@ export const openApp = async (options: AppOptions): Promise<App> => {
   }))
   const chatgpt = await run(Effect.gen(function*() {
     return yield* ChatGPT
+  }))
+  const turnPrefix = await run(Effect.gen(function*() {
+    return yield* TurnPrefix
   }))
 
   let harness!: PiHarness
@@ -155,6 +158,7 @@ export const openApp = async (options: AppOptions): Promise<App> => {
       await run(store.putRunView(key, pieces))
       return pieces
     },
+    prefix: (system) => run(turnPrefix.set(system)),
     zoom: (id, n) => run(memory.zoom(id, n)),
     date: (id) => run(memory.date(id))
   }

@@ -3,6 +3,7 @@ import { Effect, Layer } from "effect"
 import type { LogMessage, LogMeta } from "../optchat/log.ts"
 import { type LogDraft, makeMessage, OptChatStore } from "../optchat/store.ts"
 import type { Node } from "../optchat/tree.ts"
+import type { ViewState } from "../optchat/view.ts"
 
 /** OptChat's own tables, next to pi-durable's in the same Durable Object SQLite database. */
 export const OPTCHAT_SCHEMA = `
@@ -26,6 +27,10 @@ CREATE TABLE IF NOT EXISTS oc_node (
 CREATE TABLE IF NOT EXISTS oc_run_view (
   entry_id TEXT PRIMARY KEY,
   pieces TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS oc_view (
+  name TEXT PRIMARY KEY,
+  state TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS oc_kv (
   key TEXT PRIMARY KEY,
@@ -127,7 +132,13 @@ export const doOptChatStore = (db: SqliteDatabase) =>
             Effect.map((row) => (row === undefined ? undefined : (JSON.parse(String(row.pieces)) as string[])))
           ),
         putRunView: (entryId, pieces) =>
-          q(() => db.run("INSERT OR IGNORE INTO oc_run_view (entry_id, pieces) VALUES (?, ?)", entryId, JSON.stringify(pieces)))
+          q(() => db.run("INSERT OR IGNORE INTO oc_run_view (entry_id, pieces) VALUES (?, ?)", entryId, JSON.stringify(pieces))),
+        loadView: (name) =>
+          q(() => db.get<Row>("SELECT state FROM oc_view WHERE name = ?", name)).pipe(
+            Effect.map((row) => (row === undefined ? undefined : (JSON.parse(String(row.state)) as ViewState)))
+          ),
+        saveView: (name, state) =>
+          q(() => db.run("INSERT OR REPLACE INTO oc_view (name, state) VALUES (?, ?)", name, JSON.stringify(state)))
       })
     })
   )

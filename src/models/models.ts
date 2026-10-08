@@ -1,10 +1,11 @@
-import type { AssistantMessage, Message, MutableModels } from "@earendil-works/pi-ai"
+import type { AssistantMessage, Message, MutableModels, SystemMessage } from "@earendil-works/pi-ai"
 import { createModels } from "@earendil-works/pi-ai/models"
 import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai/providers/faux"
 import { Context, Effect, Layer } from "effect"
 import { bytes, NODE } from "../optchat/constants.ts"
 import { CompactorModel, ModelError } from "../optchat/memory.ts"
-import { ChatGPT } from "./chatgpt.ts"
+import { SYSTEM } from "../optchat/prompts.ts"
+import { ChatGPT, type KeyValue } from "./chatgpt.ts"
 
 export const PROVIDER = "openai"
 export const MASTER_MODEL = "gpt-6.1-sol"
@@ -89,19 +90,60 @@ const cutTo = (text: string, limit: number): string => {
   return out
 }
 
+/** The `<input>` of a compaction task. */
+const inputOf = (task: string) => {
+  const from = task.indexOf("<input>\n") + "<input>\n".length
+  return task.slice(from, task.lastIndexOf("\n</input>"))
+}
+
 /** A deterministic Compactor: compresses by cutting, merges by joining both halves cut to fit. */
 export const mockCompactor = Layer.succeed(CompactorModel)({
-  complete: (_system, turns) =>
+  complete: ({ turns }) =>
     Effect.sync(() => {
-      const step = turns[0]!.content[1] ?? ""
-      const body = step.slice(step.indexOf(":\n", step.indexOf("bytes:\n") + 7) + 2)
-      if (step.includes("Merge these two lines")) {
-        const [a = "", b = ""] = body.split("\n")
+      const task = turns[0]!.content[0] ?? ""
+      const input = inputOf(task)
+      if (task.startsWith("Compaction: merge")) {
+        const [a = "", b = ""] = input.split("\n")
         return `${cutTo(a, NODE / 2 - 2)}; ${cutTo(b, NODE / 2 - 2)}`
       }
-      return cutTo(body, 300)
+      return cutTo(input, 300)
     })
 })
+
+/**
+ * The system message (prompt, Standing Instructions, tools) the last turn sent. Compactions send the
+ * same one so they read it from the turns' cache entry (UniiChat spec §4). Persisted, so compactions
+ * after a restart keep the same prefix.
+ */
+export class TurnPrefix extends Context.Service<TurnPrefix, {
+  readonly get: Effect.Effect<SystemMessage>
+  readonly set: (system: SystemMessage) => Effect.Effect<void>
+}>()("optchat/TurnPrefix") {
+  static layer(kv: KeyValue) {
+    return Layer.effect(
+      TurnPrefix,
+      Effect.gen(function*() {
+        const saved = yield* Effect.promise(() => kv.get("turn.prefix"))
+        // Before any turn: the prompt alone (no tools yet), until the first turn sends the real prefix.
+        let current: SystemMessage = saved === undefined
+          ? { role: "system", content: "", sections: { prompt: SYSTEM }, timestamp: 0 }
+          : JSON.parse(saved)
+        let raw = saved
+        return TurnPrefix.of({
+          get: Effect.sync(() => current),
+          set: (system) =>
+            Effect.gen(function*() {
+              const next = JSON.stringify({ ...system, timestamp: 0 })
+              if (next === raw) return
+              raw = next
+              current = JSON.parse(next)
+              yield* Effect.promise(() => kv.set("turn.prefix", next))
+            })
+        })
+      })
+    )
+  }
+}
 
 /** Master and Compactor both scripted: the whole system runs without a model account. */
 export const MockModels = Layer.mergeAll(
@@ -138,18 +180,15 @@ export const shapePayload = (options: LiveOptions) => (payload: unknown): unknow
   const out: Record<string, unknown> = { ...body, service_tier: options.serviceTier }
   if (!options.explicitCacheMarks) return out
   out.reasoning = { ...(body.reasoning as object | undefined), context: "all_turns" }
+  // The cache mark goes on the last whole block of the view (UniiChat spec §3.3): the next call
+  // finds it and pays only for the lines after it.
   const input = body.input as Array<Record<string, unknown>> | undefined
   const first = input?.find((item) => item.role === "user")
-  const parts = first?.content as Array<Record<string, unknown>> | undefined
-  if (parts !== undefined) {
-    let inView = false
-    for (const part of parts) {
-      const text = typeof part.text === "string" ? part.text : ""
-      if (text.startsWith("<chat>")) inView = true
-      if (inView) part.prompt_cache_breakpoint = true
-      if (text.endsWith("</chat>")) break
-    }
-  }
+  const parts = (first?.content as Array<Record<string, unknown>> | undefined) ?? []
+  const texts = parts.map((part) => (typeof part.text === "string" ? part.text : ""))
+  const open = texts.findIndex((t) => t.startsWith("<chat>"))
+  const close = texts.findIndex((t) => t.endsWith("</chat>"))
+  if (open >= 0 && close > open) parts[close - 1]!.prompt_cache_breakpoint = true
   return out
 }
 
@@ -186,46 +225,55 @@ const liveMaster = (options: LiveOptions) =>
     })
   )
 
-/** The Compactor on `gpt-6-luna` at medium effort (the spec ran its compactor at medium). */
+/**
+ * The Compactor on `gpt-6-luna` at xhigh effort (the spec runs its cheap compactor at xhigh):
+ * `[the turns' system message and tools] [user: compaction view pieces + task] [retries …]`.
+ */
 const liveCompactor = Layer.effect(
   CompactorModel,
   Effect.gen(function*() {
     const { models } = yield* MasterModels
+    const prefix = yield* TurnPrefix
     const model = models.getModel(PROVIDER, COMPACTOR_MODEL)
     if (model === undefined) return yield* Effect.die(new Error(`no model ${COMPACTOR_MODEL}`))
     return CompactorModel.of({
-      complete: (system, turns) =>
-        Effect.tryPromise({
-          try: async () => {
-            const now = Date.now()
-            const messages: Message[] = turns.map((turn) =>
-              turn.role === "user"
-                ? { role: "user", content: turn.content.map((text) => ({ type: "text", text })), timestamp: now }
-                : ({
-                  role: "assistant",
-                  content: [{ type: "text", text: turn.content.join("") }],
-                  api: model.api,
-                  provider: model.provider,
-                  model: model.id,
-                  usage: {
-                    input: 0,
-                    output: 0,
-                    cacheRead: 0,
-                    cacheWrite: 0,
-                    totalTokens: 0,
-                    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-                  },
-                  stopReason: "stop",
-                  timestamp: now
-                } as AssistantMessage)
-            )
-            const reply = await models.completeSimple(model, { systemPrompt: system, messages } as never, {
-              reasoning: "medium"
-            })
-            if (reply.stopReason === "error") throw new Error(reply.errorMessage ?? "compactor request failed")
-            return reply.content.map((b) => (b.type === "text" ? b.text : "")).join("")
-          },
-          catch: (e) => new ModelError({ message: e instanceof Error ? e.message : String(e) })
+      complete: ({ view, turns }) =>
+        Effect.gen(function*() {
+          const system = yield* prefix.get
+          return yield* Effect.tryPromise({
+            try: async () => {
+              const now = Date.now()
+              const messages: Message[] = [system]
+              turns.forEach((turn, k) => {
+                const content = k === 0 ? [...view, ...turn.content] : [...turn.content]
+                messages.push(
+                  turn.role === "user"
+                    ? { role: "user", content: content.map((text) => ({ type: "text", text })), timestamp: now }
+                    : ({
+                      role: "assistant",
+                      content: [{ type: "text", text: content.join("") }],
+                      api: model.api,
+                      provider: model.provider,
+                      model: model.id,
+                      usage: {
+                        input: 0,
+                        output: 0,
+                        cacheRead: 0,
+                        cacheWrite: 0,
+                        totalTokens: 0,
+                        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+                      },
+                      stopReason: "stop",
+                      timestamp: now
+                    } as AssistantMessage)
+                )
+              })
+              const reply = await models.completeSimple(model, { messages } as never, { reasoning: "xhigh" })
+              if (reply.stopReason === "error") throw new Error(reply.errorMessage ?? "compactor request failed")
+              return reply.content.map((b) => (b.type === "text" ? b.text : "")).join("")
+            },
+            catch: (e) => new ModelError({ message: e instanceof Error ? e.message : String(e) })
+          })
         })
     })
   })
