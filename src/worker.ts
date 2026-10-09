@@ -71,7 +71,10 @@ export default {
     if (request.method === "OPTIONS" && url.pathname.startsWith("/api/")) return new Response(null, { status: 204, headers: CORS })
     if (url.pathname === "/" || url.pathname === "/ui") return Response.redirect(new URL("/ui/", url).toString(), 302)
     if (!authorized) return json({ error: "unauthorized" }, 401)
-    if (url.pathname === "/chat" || url.pathname === "/status" || url.pathname.startsWith("/api/") || hook !== undefined) {
+    if (
+      url.pathname === "/chat" || url.pathname === "/status" || url.pathname === "/admin/restart" ||
+      url.pathname.startsWith("/api/") || hook !== undefined
+    ) {
       return chat.fetch(request)
     }
     return json({ error: "not found" }, 404)
@@ -170,6 +173,11 @@ export class Chat extends DurableObject<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
+    // Discard this instance so the next request starts one on the newest deployed code; nothing is
+    // lost (everything is in storage and resumes). A busy object can otherwise keep old code running.
+    if (new URL(request.url).pathname === "/admin/restart" && request.method === "POST") {
+      this.ctx.abort("restart requested")
+    }
     const app = await this.open()
     const url = new URL(request.url)
     const hook = parseHookPath(url.pathname)

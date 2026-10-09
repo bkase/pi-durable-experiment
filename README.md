@@ -85,6 +85,8 @@ npx alchemy deploy --profile <your-alchemy-profile>   # prints the Worker URL
 
 Worker Loader (Dynamic Workers) needs a paid Workers plan.
 
+A busy Durable Object (a dashboard polling it, a long alarm) can keep running the previous code after a deploy. `curl -X POST -H "Authorization: Bearer <token>" https://<worker>/admin/restart` discards the instance; the next request starts on the new code and resumes everything from storage.
+
 ### Talk to it
 
 ```sh
