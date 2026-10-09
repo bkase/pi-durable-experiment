@@ -21,7 +21,7 @@ const recordingCompactor = (calls: Call[], reply: (call: Call) => string = () =>
     complete: (request) =>
       Effect.sync(() => {
         calls.push({ view: [...request.view], turns: request.turns.map((t) => ({ ...t, content: [...t.content] })) })
-        return reply(request)
+        return { text: reply(request) }
       })
   })
 
@@ -120,7 +120,8 @@ describe("Memory", () => {
   it.effect("retries a failed node when the next message arrives", () => {
     let failures = 2
     const flaky = Layer.succeed(CompactorModel)({
-      complete: () => (failures-- > 0 ? Effect.fail(new ModelError({ message: "rate limited" })) : Effect.succeed("ok"))
+      complete: () =>
+        failures-- > 0 ? Effect.fail(new ModelError({ message: "rate limited" })) : Effect.succeed({ text: "ok" })
     })
     return Effect.gen(function*() {
       const memory = yield* Memory

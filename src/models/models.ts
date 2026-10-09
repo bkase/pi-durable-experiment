@@ -104,9 +104,9 @@ export const mockCompactor = Layer.succeed(CompactorModel)({
       const input = inputOf(task)
       if (task.startsWith("Compaction: merge")) {
         const [a = "", b = ""] = input.split("\n")
-        return `${cutTo(a, NODE / 2 - 2)}; ${cutTo(b, NODE / 2 - 2)}`
+        return { text: `${cutTo(a, NODE / 2 - 2)}; ${cutTo(b, NODE / 2 - 2)}` }
       }
-      return cutTo(input, 300)
+      return { text: cutTo(input, 300) }
     })
 })
 
@@ -270,7 +270,11 @@ const liveCompactor = Layer.effect(
               })
               const reply = await models.completeSimple(model, { messages } as never, { reasoning: "xhigh" })
               if (reply.stopReason === "error") throw new Error(reply.errorMessage ?? "compactor request failed")
-              return reply.content.map((b) => (b.type === "text" ? b.text : "")).join("")
+              const { input, output, cacheRead, cacheWrite } = reply.usage
+              return {
+                text: reply.content.map((b) => (b.type === "text" ? b.text : "")).join(""),
+                usage: { input, output, cacheRead, cacheWrite }
+              }
             },
             catch: (e) => new ModelError({ message: e instanceof Error ? e.message : String(e) })
           })

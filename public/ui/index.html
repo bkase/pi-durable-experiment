@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OptChat</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='12' width='14' height='3' rx='1' fill='%23f2a93b'/%3E%3Crect x='1' y='7' width='9' height='3' rx='1' fill='%23888'/%3E%3Crect x='1' y='2' width='5' height='3' rx='1' fill='%23888'/%3E%3C/svg%3E">
+<style>
+  /* ─────────────────────────────────────────────────────────
+   * TOKENS — one accent: amber means "in the Memory View".
+   * ───────────────────────────────────────────────────────── */
+  :root {
+    --bg: #0c0c0d; --fg: #ececec; --muted: #8b8b8f; --faint: #2a2a2e; --line: #1d1d20;
+    --accent: #f2a93b; --accent-soft: rgba(242,169,59,.35); --event: #7aa2f7; --bad: #e5604d;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #fafaf9; --fg: #18181b; --muted: #77777c; --faint: #e4e4e2; --line: #ececea;
+            --accent: #d98a12; --accent-soft: rgba(217,138,18,.35); --event: #3d6fd9; --bad: #c8402d; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 13px/1.45 system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; overflow: hidden; }
+
+  nav { position: fixed; top: 14px; left: 14px; display: flex; gap: 4px; z-index: 3; }
+  nav button { all: unset; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px;
+    color: var(--fg); opacity: .32; cursor: pointer; transition: opacity .15s, background .15s; }
+  nav button:hover { opacity: .7; }
+  nav button[aria-pressed="true"] { opacity: 1; background: var(--line); }
+  nav svg { width: 16px; height: 16px; }
+
+  #pulse { position: fixed; top: 22px; right: 18px; display: flex; align-items: center; gap: 10px; z-index: 3;
+    font: 12px var(--mono); color: var(--muted); }
+  #gauge { width: 56px; height: 4px; border-radius: 2px; background: var(--faint); position: relative; overflow: hidden; }
+  #gauge i { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 2px; transition: width .4s; }
+  #gauge b { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--bg); }
+  #dot { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); transition: background .3s; }
+  #dot.live { background: var(--accent); animation: breathe 1.6s ease-in-out infinite; }
+  @keyframes breathe { 50% { opacity: .35; } }
+
+  main { position: fixed; inset: 0; }
+  main > section { position: absolute; inset: 0; opacity: 0; pointer-events: none; transition: opacity .18s ease; }
+  main > section.on { opacity: 1; pointer-events: auto; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #tree canvas { cursor: crosshair; }
+  #tree canvas.grab { cursor: grabbing; }
+
+  #big { position: absolute; left: 50%; top: 22%; transform: translate(-50%, -50%); text-align: center; pointer-events: none; }
+  #big .n { font: 200 96px/1 system-ui, sans-serif; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
+  #big .n small { font-size: .4em; color: var(--muted); margin-left: 2px; }
+
+  #inspect { position: fixed; left: 50%; bottom: 18px; transform: translate(-50%, 8px); width: min(760px, calc(100vw - 32px));
+    max-height: 34vh; overflow: auto; padding: 12px 14px; border-radius: 10px; background: color-mix(in srgb, var(--bg) 88%, var(--fg));
+    font: 12px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; opacity: 0; pointer-events: none;
+    transition: opacity .14s ease, transform .14s ease; z-index: 4; box-shadow: 0 8px 30px rgba(0,0,0,.25); }
+  #inspect.on { opacity: 1; transform: translate(-50%, 0); }
+  #inspect.pinned { pointer-events: auto; outline: 1px solid var(--accent-soft); }
+  #inspect .h { color: var(--accent); }
+  #inspect .m { color: var(--muted); }
+
+  #gate { position: fixed; inset: 0; display: none; place-items: center; z-index: 5; background: var(--bg); }
+  #gate.on { display: grid; }
+  #gate input { width: 240px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--faint); background: transparent;
+    color: var(--fg); font: 13px var(--mono); text-align: center; outline: none; }
+  #gate input:focus { border-color: var(--accent); }
+</style>
+</head>
+<body>
+<nav>
+  <button data-view="tree" title="Memory tree  (1)" aria-pressed="true">
+    <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="12" width="14" height="2.5" rx="1"/><rect x="1" y="7.5" width="9" height="2.5" rx="1"/><rect x="1" y="3" width="4" height="2.5" rx="1"/></svg>
+  </button>
+  <button data-view="runs" title="Runs  (2)">
+    <svg viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="2" width="7" height="2.5" rx="1"/><rect x="5" y="6.75" width="10" height="2.5" rx="1"/><rect x="3" y="11.5" width="5" height="2.5" rx="1"/></svg>
+  </button>
+  <button data-view="cache" title="Cache  (3)">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="8" r="5.5" opacity=".3"/><path d="M8 2.5a5.5 5.5 0 1 1-5.2 7.3"/></svg>
+  </button>
+</nav>
+
+<div id="pulse" title="messages · Memory View (64–128 KB sawtooth)">
+  <span id="T">·</span><span id="gauge"><i></i><b></b></span><span id="dot"></span>
+</div>
+
+<main>
+  <section id="tree" class="on"><canvas></canvas></section>
+  <section id="runs"><canvas></canvas></section>
+  <section id="cache"><div id="big"><div class="n">–</div></div><canvas></canvas></section>
+</main>
+
+<div id="inspect"></div>
+<div id="gate"><input type="password" placeholder="token" autocomplete="off" spellcheck="false"></div>
+
+<script>
+/* ─────────────────────────────────────────────────────────
+ * OPTCHAT DASHBOARD
+ *
+ *   tree   the Summary Tree as an icicle; amber = in the Memory View,
+ *          amber ring = only in the Compaction View, dashed = unbuilt;
+ *          leaf weight: user > talk > tool/echo, events blue
+ *   runs   one row per Run: settle · model · tool spans
+ *   cache  hit rate; per call: read · write · uncached (turns ↑, compactions ↓)
+ *
+ *   hover → inspect · click → pin · wheel/drag → zoom/pan · 1 2 3 · esc
+ * ───────────────────────────────────────────────────────── */
+
+const TIMING = { poll: 3000, fade: 180 };
+const API = new URLSearchParams(location.search).get("api") ?? "";
+const KIND = { u: "user", t: "talk", o: "tool", e: "echo", v: "event", n: "note" };
+
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const $ = (sel) => document.querySelector(sel);
+const fmtMs = (ms) => (ms < 1000 ? Math.round(ms) + "ms" : (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + "s");
+const fmtTok = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n));
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+
+/* ── token gate ─────────────────────────────────────────── */
+let token = "";
+try { token = localStorage.getItem("optchat.token") ?? ""; } catch {}
+const gate = $("#gate"), gateInput = $("#gate input");
+const askToken = () => { gate.classList.add("on"); gateInput.value = ""; gateInput.focus(); };
+gateInput.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || !gateInput.value) return;
+  token = gateInput.value.trim();
+  try { localStorage.setItem("optchat.token", token); } catch {}
+  gate.classList.remove("on");
+  refresh();
+});
+
+async function api(route, params = {}) {
+  const q = new URLSearchParams(params).toString();
+  const res = await fetch(`${API}/api/${route}${q ? "?" + q : ""}`, { headers: { authorization: `Bearer ${token}` } });
+  if (res.status === 401) { askToken(); throw new Error("unauthorized"); }
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? res.statusText);
+  return res.json();
+}
+
+/* ── inspector ──────────────────────────────────────────── */
+const inspect = $("#inspect");
+let pinned = false;
+function show(html, pin = false) {
+  if (pinned && !pin) return;
+  inspect.innerHTML = html;
+  inspect.classList.add("on");
+  inspect.classList.toggle("pinned", pin);
+  pinned = pin;
+}
+function hide(force = false) {
+  if (pinned && !force) return;
+  pinned = false;
+  inspect.classList.remove("on", "pinned");
+}
+
+/* ── canvas helper ──────────────────────────────────────── */
+function surface(canvas) {
+  const ctx = canvas.getContext("2d");
+  const size = () => {
+    const dpr = devicePixelRatio || 1, r = canvas.getBoundingClientRect();
+    canvas.width = Math.round(r.width * dpr); canvas.height = Math.round(r.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return r;
+  };
+  return { ctx, size };
+}
+const roundRect = (ctx, x, y, w, h, r) => { ctx.beginPath(); ctx.roundRect(x, y, w, h, Math.min(r, w / 2, h / 2)); };
+
+/* ── view switching ─────────────────────────────────────── */
+const VIEWS = ["tree", "runs", "cache"];
+let view = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "tree";
+function setView(v) {
+  view = v;
+  history.replaceState(null, "", "#" + v);
+  document.querySelectorAll("nav button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === v)));
+  document.querySelectorAll("main > section").forEach((s) => s.classList.toggle("on", s.id === v));
+  hide(true);
+  refresh();
+}
+document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click", () => setView(b.dataset.view)));
+addEventListener("keydown", (e) => {
+  if (e.target === gateInput) return;
+  if (e.key === "Escape") hide(true);
+  const v = { 1: "tree", 2: "runs", 3: "cache" }[e.key];
+  if (v) setView(v);
+});
+
+/* ═════════════════════════════════════════════════════════
+ * TREE
+ * ═════════════════════════════════════════════════════════ */
+const tree = (() => {
+  const canvas = $("#tree canvas"), { ctx, size } = surface(canvas);
+  let data = null, built = new Map(), inView = new Set(), inCompact = new Set();
+  let born = new Map();              // node key → first-seen time, for the fade-in
+  let x0 = 0, x1 = 1;                // visible message range
+  let follow = true;                 // keep the newest messages in view
+  let hover = null, rects = [];
+  const texts = new Map();
+  const key = (l, i) => l + ":" + i;
+
+  function load(d) {
+    const now = performance.now(), first = data === null;
+    data = d;
+    built = new Map(d.nodes.map(([l, i, s]) => [key(l, i), s]));
+    for (const k of built.keys()) if (!born.has(k)) born.set(k, first ? 0 : now);
+    inView = new Set(d.view.map(([l, i]) => key(l, i)));
+    inCompact = new Set(d.compact.map(([l, i]) => key(l, i)));
+    if (follow || first) { x0 = 0; x1 = Math.max(d.T, 8); }
+    draw();
+  }
+
+  function draw() {
+    const r = size(), W = r.width, H = r.height;
+    ctx.clearRect(0, 0, W, H);
+    rects = [];
+    if (!data || data.T === 0) return;
+    const levels = Math.max(1, Math.ceil(Math.log2(Math.max(2, data.T))) + 1);
+    const rowH = Math.min(34, (H - 160) / levels), gap = 2;
+    const baseY = H / 2 + (levels * rowH) / 2;
+    const sx = (m) => ((m - x0) / (x1 - x0)) * (W - 48) + 24;
+    const now = performance.now();
+    const c = { node: css("--faint"), fg: css("--fg"), muted: css("--muted"), accent: css("--accent"), event: css("--event") };
+    let animating = false;
+
+    for (let l = 0; l < levels; l++) {
+      const n = 2 ** l, y = baseY - (l + 1) * rowH;
+      const from = Math.max(0, Math.floor(x0 / n)), to = Math.min(Math.floor(data.T / n), Math.ceil(x1 / n));
+      for (let i = from; i < to + (l === 0 ? 1 : 0) && i * n < data.T; i++) {
+        const k = key(l, i), has = built.has(k);
+        if (!has && l > 0) continue;
+        const xa = sx(i * n), xb = sx((i + 1) * n), w = Math.max(1, xb - xa - (xb - xa > 4 ? gap : 0));
+        if (xb < 0 || xa > W) continue;
+        const age = now - (born.get(k) ?? 0), a = Math.min(1, age / TIMING.fade);
+        if (a < 1) animating = true;
+        ctx.globalAlpha = a;
+        // Amber = in the Memory View. Within a row of leaves, weight follows value:
+        // the user's words strongest, replies next, tool steps faint, events blue.
+        let fill = inView.has(k) ? c.accent : c.node;
+        if (l === 0 && data.kinds[i] === "v") fill = c.event;
+        const weight = l > 0 ? 1 : ({ u: 1, t: .7, o: .38, e: .38 })[data.kinds[i]] ?? .7;
+        if (!has) {
+          ctx.strokeStyle = c.muted; ctx.setLineDash([2, 2]);
+          roundRect(ctx, xa + .5, y + .5, w - 1, rowH - gap - 1, 3); ctx.stroke(); ctx.setLineDash([]);
+        } else {
+          ctx.globalAlpha = a * weight;
+          ctx.fillStyle = fill; roundRect(ctx, xa, y, w, rowH - gap, 3); ctx.fill();
+          ctx.globalAlpha = a;
+        }
+        // Lines only the Compaction View has (it is the Memory View merged further): an amber ring.
+        if (inCompact.has(k) && !inView.has(k)) {
+          ctx.strokeStyle = c.accent; ctx.lineWidth = 1.5;
+          roundRect(ctx, xa + .75, y + .75, w - 1.5, rowH - gap - 1.5, 3); ctx.stroke(); ctx.lineWidth = 1;
+        }
+        if (hover && hover.l === l && hover.i === i) {
+          ctx.strokeStyle = c.fg; ctx.lineWidth = 1.5; roundRect(ctx, xa, y, w, rowH - gap, 3); ctx.stroke(); ctx.lineWidth = 1;
+        }
+        rects.push({ l, i, x: xa, y, w, h: rowH - gap });
+      }
+    }
+    ctx.globalAlpha = 1;
+    if (animating) requestAnimationFrame(draw);
+  }
+
+  const hit = (x, y) => { for (let k = rects.length - 1; k >= 0; k--) { const r = rects[k];
+    if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return r; } return null; };
+
+  async function text(l, i) {
+    const k = key(l, i);
+    if (!texts.has(k)) texts.set(k, l === 0 && !built.has(k)
+      ? api("message", { i }).then((d) => d.text)
+      : api("node", { l, i }).then((d) => d.text ?? ""));
+    return texts.get(k);
+  }
+  async function describe(r, pin) {
+    const n = 2 ** r.l, name = `${r.i * n}+${n}`;
+    const tag = inView.has(key(r.l, r.i)) ? " ●" : "";
+    show(`<span class="h">${name}${tag}</span>  <span class="m">…</span>`, pin);
+    const body = pin && r.l === 0 ? (await api("message", { i: r.i })).text.replace(/^\d+\+0\|/, "") : await text(r.l, r.i);
+    if (!pin && pinned) return;
+    show(`<span class="h">${name}${tag}</span>\n${esc(body)}`, pin);
+  }
+
+  let drag = null;
+  canvas.addEventListener("mousemove", (e) => {
+    if (drag) {
+      const dx = ((e.clientX - drag.x) / (canvas.clientWidth - 48)) * (drag.x1 - drag.x0);
+      x0 = drag.x0 - dx; x1 = drag.x1 - dx; follow = false; draw(); return;
+    }
+    const r = hit(e.offsetX, e.offsetY);
+    if ((r?.l ?? -1) !== (hover?.l ?? -1) || r?.i !== hover?.i) { hover = r; draw(); if (r) describe(r, false); else hide(); }
+  });
+  canvas.addEventListener("mouseleave", () => { hover = null; draw(); hide(); });
+  canvas.addEventListener("mousedown", (e) => { drag = { x: e.clientX, x0, x1, moved: false, sx: e.clientX }; canvas.classList.add("grab"); });
+  addEventListener("mouseup", (e) => {
+    if (!drag) return;
+    const click = Math.abs(e.clientX - drag.sx) < 3;
+    drag = null; canvas.classList.remove("grab");
+    if (click && e.target === canvas) { const r = hit(e.offsetX, e.offsetY); if (r) describe(r, true); else hide(true); }
+  });
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const m = x0 + ((e.offsetX - 24) / (canvas.clientWidth - 48)) * (x1 - x0);
+    const f = Math.exp(e.deltaY * 0.0015), span = Math.max(4, Math.min((data?.T ?? 8) * 1.2, (x1 - x0) * f));
+    x0 = m - (m - x0) * (span / (x1 - x0)); x1 = x0 + span;
+    follow = data !== null && x1 >= data.T - 0.5 && x0 <= 0.5; draw();
+  }, { passive: false });
+  canvas.addEventListener("dblclick", () => { follow = true; if (data) { x0 = 0; x1 = Math.max(data.T, 8); } draw(); });
+  addEventListener("resize", draw);
+
+  return { load, draw };
+})();
+
+/* ═════════════════════════════════════════════════════════
+ * RUNS
+ * ═════════════════════════════════════════════════════════ */
+const runs = (() => {
+  const canvas = $("#runs canvas"), { ctx, size } = surface(canvas);
+  let data = null, bars = [], rows = [], hover = null;
+
+  function draw() {
+    const r = size(), W = r.width, H = r.height;
+    ctx.clearRect(0, 0, W, H);
+    bars = []; rows = [];
+    if (!data || data.runs.length === 0) return;
+    const left = 24, right = 40, top = 76, rowH = 18, gap = 10;
+    const spanOf = (run) => Math.max(1, run.end - run.start);
+    // A row's length is its duration on a log scale (1 ms … the longest Run), so a 5 ms Run and a
+    // 3 minute Run both read; inside a row, spans are laid out linearly.
+    const longest = Math.max(...data.runs.map(spanOf));
+    const lengthOf = (run) => Math.max(24, (Math.log1p(spanOf(run)) / Math.log1p(longest)) * (W - left - right));
+    const c = { faint: css("--faint"), fg: css("--fg"), muted: css("--muted"), accent: css("--accent"), bad: css("--bad") };
+    data.runs.forEach((run, k) => {
+      const y = top + k * (rowH + gap);
+      if (y > H - 20) return;
+      const live = k === 0 && data.running;
+      rows.push({ run, y, h: rowH });
+      const len = lengthOf(run), x = (ms) => left + (ms / spanOf(run)) * len;
+      ctx.fillStyle = c.faint; ctx.fillRect(left, y + rowH / 2, len, 1);
+      for (const s of run.spans) {
+        const xa = x(s.start - run.start), xb = Math.max(xa + 2, x(s.end - run.start));
+        const lane = s.kind === "tool" ? 1 : 0;
+        const h = s.kind === "settle" ? 4 : rowH / 2 - 1, yy = s.kind === "settle" ? y + rowH / 2 - 2 : y + lane * (rowH / 2 + 1);
+        ctx.fillStyle = s.error ? c.bad : s.kind === "model" ? c.accent : s.kind === "tool" ? c.fg : c.muted;
+        ctx.globalAlpha = s.kind === "settle" ? .45 : s.kind === "tool" ? .55 : 1;
+        if (hover === s) ctx.globalAlpha = 1;
+        roundRect(ctx, xa, yy, xb - xa, h, 2); ctx.fill();
+        ctx.globalAlpha = 1;
+        bars.push({ s, run, x: xa, y: yy, w: xb - xa, h });
+      }
+      if (live) { ctx.fillStyle = c.accent; ctx.beginPath(); ctx.arc(left + len + 8, y + rowH / 2, 3, 0, 7); ctx.fill(); }
+    });
+  }
+
+  canvas.addEventListener("mousemove", (e) => {
+    const b = bars.find((b) => e.offsetX >= b.x - 2 && e.offsetX <= b.x + b.w + 2 && e.offsetY >= b.y - 2 && e.offsetY <= b.y + b.h + 2);
+    const row = b ? null : rows.find((r) => e.offsetY >= r.y - 4 && e.offsetY <= r.y + r.h + 4);
+    hover = b?.s ?? null; draw();
+    if (b) {
+      const s = b.s, u = s.usage;
+      const tok = u ? `  <span class="m">in ${fmtTok(u.input + u.cacheRead + u.cacheWrite)} · read ${fmtTok(u.cacheRead)} · write ${fmtTok(u.cacheWrite)} · out ${fmtTok(u.output)}</span>` : "";
+      show(`<span class="h">${esc(s.kind === "model" ? s.name : s.kind === "tool" ? s.name : "settle")}</span>  ${fmtMs(s.end - s.start)}${tok}`);
+    } else if (row) {
+      show(`<span class="m">${fmtMs(row.run.end - row.run.start)} · ${new Date(row.run.start).toLocaleString()}</span>\n${esc(row.run.input)}`);
+    } else hide();
+  });
+  canvas.addEventListener("mouseleave", () => { hover = null; draw(); hide(); });
+  canvas.addEventListener("click", (e) => {
+    const row = rows.find((r) => e.offsetY >= r.y - 4 && e.offsetY <= r.y + r.h + 4);
+    if (row) show(`<span class="m">${fmtMs(row.run.end - row.run.start)} · ${new Date(row.run.start).toLocaleString()}</span>\n${esc(row.run.input)}`, true);
+    else hide(true);
+  });
+  addEventListener("resize", draw);
+  return { load: (d) => { data = d; draw(); }, draw };
+})();
+
+/* ═════════════════════════════════════════════════════════
+ * CACHE
+ * ═════════════════════════════════════════════════════════ */
+const cache = (() => {
+  const canvas = $("#cache canvas"), { ctx, size } = surface(canvas);
+  let calls = [], bars = [], hover = null;
+
+  function draw() {
+    const r = size(), W = r.width, H = r.height;
+    ctx.clearRect(0, 0, W, H);
+    bars = [];
+    const total = calls.reduce((a, c) => a + c.input + c.cacheRead + c.cacheWrite, 0);
+    const read = calls.reduce((a, c) => a + c.cacheRead, 0);
+    $("#big .n").innerHTML = total ? `${Math.round((100 * read) / total)}<small>%</small>` : "–";
+    if (!calls.length) return;
+    const left = 24, right = 24, mid = H * 0.68, half = H * 0.2;
+    const max = Math.max(...calls.map((c) => c.input + c.cacheRead + c.cacheWrite), 1);
+    const step = (W - left - right) / calls.length, w = Math.max(1, Math.min(10, step - (step > 3 ? 1 : 0)));
+    const c = { accent: css("--accent"), soft: css("--accent-soft"), muted: css("--muted"), faint: css("--faint"), fg: css("--fg") };
+    ctx.fillStyle = c.faint; ctx.fillRect(left, mid, W - left - right, 1);
+    calls.forEach((call, k) => {
+      const x = left + k * step, dir = call.kind === "compaction" ? 1 : -1;
+      const parts = [[call.cacheRead, c.accent], [call.cacheWrite, c.soft], [call.input, c.muted]];
+      let off = 1;
+      for (const [v, color] of parts) {
+        const h = (v / max) * half;
+        ctx.fillStyle = color; ctx.globalAlpha = hover === call || hover === null ? 1 : .55;
+        ctx.fillRect(x, dir < 0 ? mid - off - h : mid + off, w, h);
+        off += h;
+      }
+      ctx.globalAlpha = 1;
+      bars.push({ call, x, w: Math.max(w, step), dir });
+    });
+  }
+
+  canvas.addEventListener("mousemove", (e) => {
+    const b = bars.find((b) => e.offsetX >= b.x && e.offsetX < b.x + b.w);
+    hover = b?.call ?? null; draw();
+    if (!b) return hide();
+    const u = b.call, all = u.input + u.cacheRead + u.cacheWrite;
+    show(`<span class="h">${esc(u.kind === "compaction" ? "compaction " + u.name : u.name)}</span>  ${Math.round((100 * u.cacheRead) / Math.max(1, all))}%  <span class="m">read ${fmtTok(u.cacheRead)} · write ${fmtTok(u.cacheWrite)} · uncached ${fmtTok(u.input)} · out ${fmtTok(u.output)} · ${fmtMs(u.end - u.start)}</span>`);
+  });
+  canvas.addEventListener("mouseleave", () => { hover = null; draw(); hide(); });
+  addEventListener("resize", draw);
+  return { load: (d) => { calls = d.calls; draw(); }, draw };
+})();
+
+/* ── polling ────────────────────────────────────────────── */
+let busy = false;
+async function refresh() {
+  if (!token) return askToken();
+  if (busy) return;
+  busy = true;
+  try {
+    const t = await api("tree");
+    $("#T").textContent = t.T;
+    $("#gauge i").style.width = `${Math.min(100, (100 * t.viewBytes) / 128000)}%`;
+    if (view === "tree") tree.load(t);
+    const r = await api("runs", { limit: view === "runs" ? 60 : 1 });
+    $("#dot").classList.toggle("live", r.running);
+    if (view === "runs") runs.load(r);
+    if (view === "cache") cache.load(await api("cache"));
+  } catch (e) {
+    if (String(e.message) !== "unauthorized") console.warn(e);
+  } finally { busy = false; }
+}
+setInterval(() => { if (!document.hidden) refresh(); }, TIMING.poll);
+addEventListener("hashchange", () => { const v = location.hash.slice(1); if (VIEWS.includes(v) && v !== view) setView(v); });
+if (view !== "tree") setView(view);
+document.addEventListener("visibilitychange", refresh);
+refresh();
+</script>
+</body>
+</html>

@@ -29,8 +29,14 @@ const HEARTBEAT_MS = 30_000
 /** An alarm may run 15 minutes; leave room to reschedule. */
 const ALARM_WORK_MS = 13 * 60_000
 
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-headers": "authorization",
+  "access-control-allow-methods": "GET, OPTIONS"
+}
+
 const json = (body: unknown, status = 200) =>
-  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...CORS } })
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -41,8 +47,12 @@ export default {
     const authorized = token !== undefined && (await safeEqual(token, env.OPTCHAT_TOKEN))
 
     if (url.pathname === "/health") return json({ ok: true })
+    if (request.method === "OPTIONS" && url.pathname.startsWith("/api/")) return new Response(null, { status: 204, headers: CORS })
+    if (url.pathname === "/" || url.pathname === "/ui") return Response.redirect(new URL("/ui/", url).toString(), 302)
     if (!authorized) return json({ error: "unauthorized" }, 401)
-    if (url.pathname === "/chat" || url.pathname === "/status" || hook !== undefined) return chat.fetch(request)
+    if (url.pathname === "/chat" || url.pathname === "/status" || url.pathname.startsWith("/api/") || hook !== undefined) {
+      return chat.fetch(request)
+    }
     return json({ error: "not found" }, 404)
   }
 } satisfies ExportedHandler<Env>
@@ -140,6 +150,13 @@ export class Chat extends DurableObject<Env> {
       return json({ result }, 202)
     }
     if (url.pathname === "/status") return json(await app.status())
+    if (url.pathname.startsWith("/api/")) {
+      try {
+        return json(await app.api(url.pathname.slice(5), url.searchParams))
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : String(error) }, 400)
+      }
+    }
     if (url.pathname === "/chat") {
       if (request.headers.get("upgrade") !== "websocket") return json({ error: "expected websocket" }, 426)
       const pair = new WebSocketPair()

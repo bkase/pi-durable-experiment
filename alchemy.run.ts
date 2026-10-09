@@ -10,6 +10,9 @@ import type { Chat } from "./src/worker.ts"
  */
 export const Worker = Cloudflare.Worker("OptChat", {
   main: "./src/worker.ts",
+  // The dashboard (public/ui/index.html at /ui/): static, served before the Worker; its data comes
+  // from the token-protected /api/* routes.
+  assets: "./public",
   // nodejs_compat and ctx.exports are on by default at this date.
   compatibility: { date: "2026-09-25" },
   // Per event. Normal events use well under a second; this caps any runaway loop quickly.

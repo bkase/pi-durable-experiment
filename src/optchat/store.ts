@@ -13,6 +13,25 @@ export interface LogDraft {
   readonly date: string
 }
 
+/** Token usage of one model call. */
+export interface TokenUsage {
+  readonly input: number
+  readonly output: number
+  readonly cacheRead: number
+  readonly cacheWrite: number
+}
+
+/** One timed span, for the dashboard: a Run's settle wait, model call or tool call, or a compaction. */
+export interface Span {
+  readonly run?: string
+  readonly kind: "settle" | "model" | "tool" | "compaction"
+  readonly name: string
+  readonly start: number
+  readonly end: number
+  readonly usage?: TokenUsage
+  readonly error?: boolean
+}
+
 /**
  * Durable storage for OptChat's derived state: the Log index (projected from the transcript)
  * and the Summary Tree. Writes are synchronous and atomic per call.
@@ -37,6 +56,7 @@ export interface OptChatStoreShape {
   /** The saved views ("chat" and "compact"): kept across restarts, never rebuilt from the Log. */
   readonly loadView: (name: string) => Effect.Effect<ViewState | undefined>
   readonly saveView: (name: string, state: ViewState) => Effect.Effect<void>
+  readonly trace: (span: Span) => Effect.Effect<void>
 }
 
 export class OptChatStore extends Context.Service<OptChatStore, OptChatStoreShape>()("optchat/OptChatStore") {
@@ -73,7 +93,8 @@ export class OptChatStore extends Context.Service<OptChatStore, OptChatStoreShap
       runView: (entryId) => Effect.sync(() => runViews.get(entryId)),
       putRunView: (entryId, pieces) => Effect.sync(() => void runViews.set(entryId, pieces)),
       loadView: (name) => Effect.sync(() => views.get(name)),
-      saveView: (name, state) => Effect.sync(() => void views.set(name, state))
+      saveView: (name, state) => Effect.sync(() => void views.set(name, state)),
+      trace: () => Effect.void
     })
   })
 }

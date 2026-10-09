@@ -2,7 +2,7 @@ import { Context, Deferred, Effect, FiberSet, Layer, Schema, Semaphore } from "e
 import { bytes, COMPACT_HIGH, COMPACT_LOW, JOBS, LEAF_LAG, NODE, TRIES } from "./constants.ts"
 import { line, type LogMeta } from "./log.ts"
 import { compressTask, mergeTask, tooLong } from "./prompts.ts"
-import { type LogDraft, OptChatStore } from "./store.ts"
+import { type LogDraft, OptChatStore, type TokenUsage } from "./store.ts"
 import { freeLeaf, freeMerge, key, makeNode, name, type Node, NodeIndex, parseName, span } from "./tree.ts"
 import { MemoryView, renderPieces, type ViewState } from "./view.ts"
 
@@ -26,10 +26,27 @@ export interface CompactionRequest {
   readonly turns: ReadonlyArray<CompactorTurn>
 }
 
+export interface CompactorReply {
+  readonly text: string
+  readonly usage?: TokenUsage
+}
+
 /** The cheap model that writes Summary Tree nodes. It is given the turns' tools but must call none. */
 export class CompactorModel extends Context.Service<CompactorModel, {
-  readonly complete: (request: CompactionRequest) => Effect.Effect<string, ModelError>
+  readonly complete: (request: CompactionRequest) => Effect.Effect<CompactorReply, ModelError>
 }>()("optchat/CompactorModel") {}
+
+/** The tree and both views, compactly, for the dashboard. */
+export interface TreeSnapshot {
+  readonly T: number
+  /** One letter per message: u(ser) t(alk) o (tool) e(cho) v (event) n(ote). */
+  readonly kinds: string
+  /** [level, index, size] of every built node. */
+  readonly nodes: ReadonlyArray<readonly [number, number, number]>
+  readonly view: ReadonlyArray<readonly [number, number]>
+  readonly compact: ReadonlyArray<readonly [number, number]>
+  readonly viewBytes: number
+}
 
 export interface MemoryStatus {
   readonly T: number
@@ -59,6 +76,8 @@ export class Memory extends Context.Service<Memory, {
   readonly status: Effect.Effect<MemoryStatus>
   /** Resolves when the Compactor has nothing running. */
   readonly idle: Effect.Effect<void>
+  readonly snapshot: Effect.Effect<TreeSnapshot>
+  readonly nodeText: (l: number, i: number) => Effect.Effect<string | undefined>
 }>()("optchat/Memory") {
   static readonly layer = Layer.effect(Memory, Effect.suspend(() => make))
 }
@@ -133,12 +152,23 @@ const make = Effect.gen(function*() {
 
   const T = () => messages.length
 
-  const ask = Effect.fnUntraced(function*(end: number, task: string) {
+  const ask = Effect.fnUntraced(function*(l: number, i: number, end: number, task: string) {
     const context = renderPieces(compact.contextLines(end))
     const turns: CompactorTurn[] = [{ role: "user", content: [task] }]
     const tries: string[] = []
+    const started = Date.now()
+    const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+    let measured = false
     while (true) {
-      const reply = (yield* model.complete({ view: context, turns })).trim().replace(/^\d+\+\d+\|/, "")
+      const answer = yield* model.complete({ view: context, turns })
+      if (answer.usage !== undefined) {
+        measured = true
+        usage.input += answer.usage.input
+        usage.output += answer.usage.output
+        usage.cacheRead += answer.usage.cacheRead
+        usage.cacheWrite += answer.usage.cacheWrite
+      }
+      const reply = answer.text.trim().replace(/^\d+\+\d+\|/, "")
       if (reply.length === 0) return yield* new ModelError({ message: "empty compactor reply" })
       tries.push(reply)
       const size = bytes(reply)
@@ -148,6 +178,13 @@ const make = Effect.gen(function*() {
         content: [tooLong(size, cutBytes(reply, NODE))]
       })
     }
+    yield* store.trace({
+      kind: "compaction",
+      name: name(l, i),
+      start: started,
+      end: Date.now(),
+      ...(measured ? { usage } : {})
+    })
     return tries.reduce((a, b) => (bytes(b) < bytes(a) ? b : a))
   })
 
@@ -156,7 +193,7 @@ const make = Effect.gen(function*() {
       const message = (yield* store.message(i))!
       const free = freeLeaf(message)
       if (free !== undefined) return free
-      return makeNode(0, i, yield* ask(i, compressTask(i, message.kind, message.text)))
+      return makeNode(0, i, yield* ask(0, i, i, compressTask(i, message.kind, message.text)))
     }
     const a = index.get(l - 1, 2 * i)!
     const b = index.get(l - 1, 2 * i + 1)!
@@ -168,6 +205,8 @@ const make = Effect.gen(function*() {
       l,
       i,
       yield* ask(
+        l,
+        i,
         end,
         mergeTask(`${name(l - 1, 2 * i)}|${flat(a.text)}`, `${name(l - 1, 2 * i + 1)}|${flat(b.text)}`, first, end - 1)
       )
@@ -298,6 +337,17 @@ const make = Effect.gen(function*() {
       first: view.first(),
       batches
     })),
-    idle
+    idle,
+    snapshot: Effect.sync(() => ({
+      T: T(),
+      kinds: messages.map((m) => KIND_LETTER[m.kind] ?? "?").join(""),
+      nodes: [...index.all()].map((n) => [n.l, n.i, n.size] as const),
+      view: view.lines.map((p) => [p.l, p.i] as const),
+      compact: compact.lines.map((p) => [p.l, p.i] as const),
+      viewBytes: view.size
+    })),
+    nodeText: (l, i) => Effect.sync(() => index.get(l, i)?.text)
   })
 })
+
+const KIND_LETTER: Record<string, string> = { user: "u", talk: "t", tool: "o", echo: "e", event: "v", note: "n" }

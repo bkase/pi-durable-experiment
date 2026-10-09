@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run the Worker + Chat Durable Object in a local workerd (the real Workers runtime), with
 # SQLite-backed DO storage on disk and a Worker Loader. Token: dev-token. Port: 8787.
+# The dashboard is served on PORT+1: http://127.0.0.1:8788/ui/index.html?api=http://127.0.0.1:8787
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p .local/do
@@ -30,4 +31,7 @@ const optchat :Workerd.Worker = (
   globalOutbound = "internet",
 );
 CAPNP
-exec node_modules/@cloudflare/workerd-darwin-arm64/bin/workerd serve .local/config.capnp --verbose --experimental ${WORKERD_FLAGS:-}
+# The dashboard, as Cloudflare's asset layer would serve it.
+python3 -m http.server "$(( ${PORT:-8787} + 1 ))" --bind 127.0.0.1 --directory public >/dev/null 2>&1 &
+trap 'kill $! 2>/dev/null' EXIT
+node_modules/@cloudflare/workerd-darwin-arm64/bin/workerd serve .local/config.capnp --verbose --experimental ${WORKERD_FLAGS:-}

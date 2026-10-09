@@ -32,6 +32,17 @@ CREATE TABLE IF NOT EXISTS oc_view (
   name TEXT PRIMARY KEY,
   state TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS oc_trace (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run TEXT,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  start INTEGER NOT NULL,
+  end INTEGER NOT NULL,
+  usage TEXT,
+  error INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS oc_trace_run ON oc_trace (run, start);
 CREATE TABLE IF NOT EXISTS oc_kv (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -138,7 +149,20 @@ export const doOptChatStore = (db: SqliteDatabase) =>
             Effect.map((row) => (row === undefined ? undefined : (JSON.parse(String(row.state)) as ViewState)))
           ),
         saveView: (name, state) =>
-          q(() => db.run("INSERT OR REPLACE INTO oc_view (name, state) VALUES (?, ?)", name, JSON.stringify(state)))
+          q(() => db.run("INSERT OR REPLACE INTO oc_view (name, state) VALUES (?, ?)", name, JSON.stringify(state))),
+        trace: (span) =>
+          q(() =>
+            db.run(
+              "INSERT INTO oc_trace (run, kind, name, start, end, usage, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              span.run ?? null,
+              span.kind,
+              span.name,
+              span.start,
+              span.end,
+              span.usage === undefined ? null : JSON.stringify(span.usage),
+              span.error ? 1 : 0
+            )
+          )
       })
     })
   )

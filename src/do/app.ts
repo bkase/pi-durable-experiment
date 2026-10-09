@@ -55,6 +55,8 @@ export interface App {
     readonly finish: (redirectUrl: string) => Promise<void>
     readonly status: () => Promise<{ readonly signedIn: boolean; readonly expires?: number }>
   }
+  /** Read-only data for the dashboard: `tree`, `node`, `message`, `runs`, `cache`. */
+  readonly api: (route: string, query: URLSearchParams) => Promise<unknown>
   readonly subscribe: (listener: (events: ReadonlyArray<AgentEvent>) => void) => () => void
   readonly snapshot: () => AgentEventStream["snapshot"]
 }
@@ -153,12 +155,15 @@ export const openApp = async (options: AppOptions): Promise<App> => {
       if (frozen !== undefined) return frozen
       const end = await run(store.firstOf(key))
       if (end === undefined) throw new Error(`run input ${key} is not in the Log`)
+      const started = Date.now()
       await runtime.runPromise(memory.settle(end), signal === undefined ? {} : { signal })
+      await run(store.trace({ run: key, kind: "settle", name: "settle", start: started, end: Date.now() }))
       const pieces = await run(memory.render(end))
       await run(store.putRunView(key, pieces))
       return pieces
     },
     prefix: (system) => run(turnPrefix.set(system)),
+    trace: (span) => run(store.trace(span)),
     zoom: (id, n) => run(memory.zoom(id, n)),
     date: (id) => run(memory.date(id))
   }
@@ -314,6 +319,64 @@ export const openApp = async (options: AppOptions): Promise<App> => {
       start: () => run(chatgpt.start),
       finish: (redirectUrl) => run(chatgpt.finish(redirectUrl)),
       status: () => run(chatgpt.status)
+    },
+    api: async (route, query) => {
+      const num = (k: string) => Number(query.get(k) ?? "0")
+      switch (route) {
+        case "tree":
+          return run(memory.snapshot)
+        case "node":
+          return { text: (await run(memory.nodeText(num("l"), num("i")))) ?? null }
+        case "message":
+          return { text: await run(memory.zoom(num("i"), 1)) }
+        case "runs": {
+          const limit = Math.min(200, Math.max(1, num("limit") || 40))
+          const runs = await db.all<Row>(
+            "SELECT run, MIN(start) AS start, MAX(end) AS end FROM oc_trace WHERE run IS NOT NULL GROUP BY run ORDER BY start DESC LIMIT ?",
+            limit
+          )
+          const out = []
+          for (const r of runs) {
+            const spans = await db.all<Row>(
+              "SELECT kind, name, start, end, usage, error FROM oc_trace WHERE run = ? ORDER BY start",
+              String(r.run)
+            )
+            const first = await run(store.firstOf(String(r.run)))
+            const input = first === undefined ? undefined : await run(store.message(first))
+            out.push({
+              run: r.run,
+              start: r.start,
+              end: r.end,
+              input: input === undefined ? "" : `${input.kind}: ${input.text.slice(0, 280)}`,
+              spans: spans.map((x) => ({
+                kind: x.kind,
+                name: x.name,
+                start: x.start,
+                end: x.end,
+                usage: x.usage === null ? undefined : JSON.parse(String(x.usage)),
+                error: x.error === 1
+              }))
+            })
+          }
+          return { running, runs: out }
+        }
+        case "cache": {
+          const rows = await db.all<Row>(
+            "SELECT kind, name, start, end, usage FROM oc_trace WHERE usage IS NOT NULL ORDER BY start DESC LIMIT 600"
+          )
+          return {
+            calls: rows.reverse().map((x) => ({
+              kind: x.kind,
+              name: x.name,
+              start: x.start,
+              end: x.end,
+              ...JSON.parse(String(x.usage))
+            }))
+          }
+        }
+        default:
+          throw new Error(`no route ${route}`)
+      }
     },
     subscribe: (listener) => {
       listeners.add(listener)

@@ -1,7 +1,8 @@
 import { Type } from "@earendil-works/pi-ai"
 import type { Context } from "@earendil-works/chord"
 import type { ConversationId, EntryId, EntryRecord } from "@earendil-works/pi-durable"
-import { defineExtension, defineTool, GenerationTask, hook, section } from "@earendil-works/pi-durable"
+import { defineExtension, defineTool, GenerationTask, hook, section, ToolTask } from "@earendil-works/pi-durable"
+import type { Span } from "../optchat/store.ts"
 import type { SystemMessage } from "@earendil-works/pi-ai"
 import { SYSTEM } from "../optchat/prompts.ts"
 import { rewriteRequest } from "./rewrite.ts"
@@ -16,6 +17,8 @@ export interface OptChatBridge {
   readonly runView: (entryId: EntryId, signal: AbortSignal | undefined) => Promise<ReadonlyArray<string>>
   /** The system message (prompt, Standing Instructions and tools) a turn just sent: compactions reuse it. */
   readonly prefix: (system: SystemMessage) => Promise<void>
+  /** Record a timed span for the dashboard. */
+  readonly trace: (span: Span) => Promise<void>
   readonly zoom: (id: number, n: number) => Promise<string>
   readonly date: (id: number) => Promise<string>
 }
@@ -56,6 +59,11 @@ export const makeOptChatExtension = (bridge: OptChatBridge) => {
     execute: async (args) => ({ content: [{ type: "text", text: await bridge.date(args.id) }] })
   })
 
+  // Open spans, by generation task and by tool call; the Run they belong to.
+  const models = new Map<string, { run: string; start: number }>()
+  const tools = new Map<string, { run: string; start: number }>()
+  let currentRun = ""
+
   return defineExtension({
     name: "optchat",
     tools: [zoom, date],
@@ -71,7 +79,45 @@ export const makeOptChatExtension = (bridge: OptChatBridge) => {
           const pieces = await bridge.runView(input.id, context.abortSignal)
           const messages = rewriteRequest(request.messages, pieces)
           if (messages[0]?.role === "system") await bridge.prefix(messages[0])
+          currentRun = String(input.id)
+          models.set(String(api.taskId), { run: currentRun, start: Date.now() })
           return { messages }
+        },
+        afterResponse: async (message, api) => {
+          const open = models.get(String(api.taskId))
+          if (open === undefined) return
+          models.delete(String(api.taskId))
+          const { input, output, cacheRead, cacheWrite } = message.usage
+          await bridge.trace({
+            run: open.run,
+            kind: "model",
+            name: message.model,
+            start: open.start,
+            end: Date.now(),
+            usage: { input, output, cacheRead, cacheWrite },
+            error: message.stopReason === "error"
+          })
+        }
+      }),
+      hook(ToolTask, {
+        beforeTool: (call) => {
+          tools.set(call.id, { run: currentRun, start: Date.now() })
+          return undefined
+        },
+        afterTool: async (call, result) => {
+          const open = tools.get(call.id)
+          if (open !== undefined) {
+            tools.delete(call.id)
+            await bridge.trace({
+              run: open.run,
+              kind: "tool",
+              name: call.name,
+              start: open.start,
+              end: Date.now(),
+              error: (result as { isError?: boolean }).isError === true
+            })
+          }
+          return undefined
         }
       })
     ]
