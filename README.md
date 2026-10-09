@@ -112,7 +112,7 @@ Things learned the hard way:
 - **pi-durable hooks can't read the transcript**, and pi-durable rebuilds the whole active context on every request — hence a `reset()` per Run.
 - **The original spec's merge order thrashed the cache.** Measuring a pair's age from its first message and merging at every message meant consecutive Runs shared only 14–38% of the view. With the revised spec (age from the last message, sawtooth batches, a saved view, compactions sharing the turns' prefix) they share 94.7% in simulation, and the merge order matches Taelin's rollback push exactly ([results](docs/experiments/memory-simulation.md), [ADR 0007](docs/adr/0007-uniichat-cache-fixes.md)).
 
-Not yet verified: behaviour with real models, prompt-cache hit rates, and whether ChatGPT tokens get the priority tier.
+Real models: the ChatGPT sign-in (Codex device code) works from the Durable Object, but **chatgpt.com blocks requests from Cloudflare Workers' network**, so live model calls need a relay outside Cloudflare (or an API key on `api.openai.com`). The deployment runs on mock models until then ([ADR 0008](docs/adr/0008-codex-device-code-sign-in.md)). Not yet verified: behaviour with real models, prompt-cache hit rates, and the priority tier.
 
 ## Limits
 

@@ -6,4 +6,4 @@ Supersedes ADR 0003's choice of flow (the rest stands: the Durable Object owns t
 
 - No paste-back step; a pending sign-in is stored, so polling resumes after an eviction, and the alarm heartbeat keeps the object awake while a code is outstanding.
 - The live provider id is `openai-codex`; the chat's stored model follows the mode on every start.
-- Unverified until the first live request: that chatgpt.com accepts requests from Cloudflare's network.
+- **Found on the first live request (2026-10-09): chatgpt.com rejects requests from Cloudflare Workers' egress** ("Unable to load site … If you are using a VPN, try turning it off", from `2a06:98c0:3600::103`). auth.openai.com accepts them, so sign-in and refresh work from the Durable Object, but model requests need to leave through a non-Cloudflare address (a relay on a cloud VM or an always-on machine), or use an API key on `api.openai.com` instead. Until then the deployment runs `MODEL_MODE=mock`; the credential stays stored.
