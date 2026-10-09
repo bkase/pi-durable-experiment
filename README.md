@@ -47,6 +47,16 @@ compaction call: [same system prompt + tools as a turn] [<chat> Compaction View 
 | `alchemy.run.ts` | The stack: Worker, `Chat` namespace, Worker Loader, shared token |
 | `cli/optchat.ts` | Terminal client |
 
+## Dashboard
+
+`/ui/` on the Worker (enter the token once; it stays in that browser). Three views, mostly wordless — hover reads, click pins:
+
+- **Memory tree** — the Summary Tree as an icicle, messages left to right, levels upward. Amber lines are what the agent sees right now (the Memory View); leaf weight follows value (your words strongest, replies, then tool steps), events blue; an amber ring marks lines only the Compaction View has. Wheel zooms, drag pans, double-click resets.
+- **Runs** — one row per Run, newest on top: model calls (amber), tool calls (grey), the settle wait. Row length is the Run's duration on a log scale.
+- **Cache** — the share of input tokens read from the prompt cache, and per call: cache read, cache write, uncached (turns above the axis, compactions below).
+
+It reads `/api/{tree,node,message,runs,cache}` (read-only, token-protected), backed by OptChat's tables and an `oc_trace` table of spans recorded through pi-durable's hooks.
+
 ## Quick start
 
 Requires Node 24+ and [Bun](https://bun.sh) (for the CLI). The releases used here were days old when this was written; `.npmrc` / `bunfig.toml` exempt exactly these packages from a 7-day release-age gate — drop them if you don't use one.
@@ -61,6 +71,7 @@ npm test                                   # unit, pi-durable's storage conforma
 ```sh
 PORT=8797 scripts/local.sh                 # macOS arm64 workerd binary; token "dev-token"; mock models
 OPTCHAT_URL=http://127.0.0.1:8797 OPTCHAT_TOKEN=dev-token bun cli/optchat.ts
+open "http://localhost:8798/ui/?api=http://127.0.0.1:8797"   # the dashboard
 ```
 
 With mock models, `/mock <tool> …` makes the scripted agent call a tool: `/mock zoom 0 4`, `/mock exec ls -la /`, `/mock write /notes/a.md hi`.
