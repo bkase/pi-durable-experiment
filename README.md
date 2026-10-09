@@ -14,7 +14,7 @@ The design was worked out interview-style first; the vocabulary is in [`CONTEXT.
 - **Chat** from a terminal client over a WebSocket; typing while the agent works steers the running Run.
 - **Remember** everything, forever, at a constant prompt size: the Memory View stays between 64 and 128 KB however long the chat gets, and only grows at its end between rare batch rewrites, so nearly all of it is read from the prompt cache.
 - **React to the outside world**: webhooks (GitHub, Stripe, your deploys…) arrive as `event` messages — logged and answered, but never treated as the user's instructions.
-- **Work** in its Workspace: read, write, edit, find, grep files, and run shell pipelines with `curl` and `jq`.
+- **Work** in its Workspace: read, write, edit, find, grep files, and run shell pipelines with `jq` — and `curl`, but only to hosts on an allow-list (`EGRESS_ALLOW` in `.env`; default GitHub's API).
 - **Survive** crashes, evictions and deploys mid-Run: an alarm heartbeat wakes the object and pi-durable resumes; a tool that may have half-run is reported to the model as interrupted, never silently re-run.
 
 ## How a Run works
@@ -33,7 +33,7 @@ compaction call: [same system prompt + tools as a turn] [<chat> Compaction View 
 
 - The pi-durable transcript **is** the Log ([ADR 0001](docs/adr/0001-transcript-is-the-log.md)); the Projector turns entries into Log Messages (`user`, `talk`, `tool`, `echo`, `event`) and never logs model thinking.
 - Each Run starts with a pi-durable `reset()`, so per-request work is one Run, not the whole history ([ADR 0005](docs/adr/0005-plain-durable-object-in-an-async-worker.md)).
-- Models: Master `gpt-6.1-sol`, Compactor `gpt-6-luna`, via "Sign in with ChatGPT" run inside the Durable Object, which alone holds and refreshes the credential ([ADR 0003](docs/adr/0003-sign-in-with-chatgpt-owned-by-the-do.md)). Scripted mock models (Effect layers) run everything without an account.
+- Models: Master `gpt-6.1-sol`, Compactor `gpt-6-luna`, through your ChatGPT subscription (Codex device-code sign-in) run inside the Durable Object, which alone holds and refreshes the credential ([ADR 0008](docs/adr/0008-codex-device-code-sign-in.md)). Scripted mock models (Effect layers) run everything without an account.
 
 ## Layout
 
@@ -42,7 +42,7 @@ compaction call: [same system prompt + tools as a turn] [<chat> Compaction View 
 | `src/optchat/` | The OptChat core in Effect: Log, Summary Tree, Memory View fold, Compactor pump, the spec's prompts (verbatim, plus the `event` kind) |
 | `src/pi/` | The seam to pi-durable: request rewrite, the OptChat extension (`zoom`, `date`, the request hook), Workspace tools, the Durable Object SQLite adapter |
 | `src/do/` | What the Durable Object runs: Runs, steering, the Event inbox, catch-up projection, OptChat's tables |
-| `src/models/` | Model access as Effect layers: `MockModels` and `LiveModels` (ChatGPT sign-in, priority tier) |
+| `src/models/` | Model access as Effect layers: `MockModels` and `LiveModels` (Codex sign-in, priority tier) |
 | `src/worker.ts` | The Worker (auth, routing) and the `Chat` Durable Object (WebSocket, webhooks, alarm) |
 | `alchemy.run.ts` | The stack: Worker, `Chat` namespace, Worker Loader, shared token |
 | `cli/optchat.ts` | Terminal client |
@@ -91,13 +91,13 @@ Worker Loader (Dynamic Workers) needs a paid Workers plan.
 OPTCHAT_URL=https://<your-worker>.workers.dev OPTCHAT_TOKEN=<token> bun cli/optchat.ts
 ```
 
-Plain lines are input. Commands: `/status`, `/view`, `/zoom <id> <n>`, `/abort`, `/instructions`, `/instructions set <text>`, `/login`, `/login <redirect-url>`, `/quit`. One-shot: `bun cli/optchat.ts send "text"`.
+Plain lines are input. Commands: `/status`, `/view`, `/zoom <id> <n>`, `/abort`, `/instructions`, `/instructions set <text>`, `/login`, `/login status`, `/quit`. One-shot: `bun cli/optchat.ts send "text"`.
 
 Webhooks: `curl -X POST -H "X-GitHub-Delivery: <id>" -d @payload.json https://<worker>/hook/<token>/github` — the delivery id (or a hash of the body) deduplicates retries.
 
-### Use real models
+### Use real models (your ChatGPT subscription)
 
-1. In the CLI, `/login` and open the URL to sign in with ChatGPT. The browser then fails to load `127.0.0.1:1455/…` — that's expected; send that URL back with `/login <url>`.
+1. In the CLI, `/login`: it shows a code. Open `auth.openai.com/codex/device`, sign in to ChatGPT and enter the code. The CLI says when it's done (`/login status` to check). The credential stays in the Durable Object, which refreshes it ([ADR 0008](docs/adr/0008-codex-device-code-sign-in.md)).
 2. Add `MODEL_MODE=live` to `.env` and redeploy. (`CACHE_MARKS=on` also sends the OptChat spec's explicit cache breakpoints; their Responses API field names are unverified.)
 
 ## Status and findings

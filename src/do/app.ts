@@ -12,7 +12,7 @@ import type {
 import { createRegistry, Harness } from "@earendil-works/pi-durable"
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite"
 import { Effect, Layer, ManagedRuntime } from "effect"
-import { ChatGPT, type KeyValue } from "../models/chatgpt.ts"
+import { ChatGPT, type KeyValue, type LoginStatus } from "../models/codex.ts"
 import { MasterModels, TurnPrefix } from "../models/models.ts"
 import { type CompactorModel, Memory, type MemoryStatus } from "../optchat/memory.ts"
 import { LOGGED_KINDS, projectEntry } from "../optchat/projector.ts"
@@ -46,14 +46,13 @@ export interface App {
   readonly zoom: (id: number, n: number) => Promise<string>
   readonly instructions: () => Promise<string>
   readonly setInstructions: (text: string) => Promise<void>
-  /** Pending work exists (a Run, queued Events, or unbuilt Nodes). */
+  /** Pending work exists (a Run, queued Events, unbuilt Nodes, or a sign-in waiting for its code). */
   readonly busy: () => Promise<boolean>
   /** Resolves when nothing is pending, or after `ms`. */
   readonly settle: (ms: number) => Promise<void>
   readonly login: {
-    readonly start: () => Promise<string>
-    readonly finish: (redirectUrl: string) => Promise<void>
-    readonly status: () => Promise<{ readonly signedIn: boolean; readonly expires?: number }>
+    readonly start: () => Promise<{ readonly userCode: string; readonly verificationUri: string }>
+    readonly status: () => Promise<LoginStatus>
   }
   /** Read-only data for the dashboard: `tree`, `node`, `message`, `runs`, `cache`. */
   readonly api: (route: string, query: URLSearchParams) => Promise<unknown>
@@ -65,6 +64,8 @@ export interface AppOptions {
   readonly storage: DoStorage
   readonly workspace: Workspace
   readonly exec: boolean
+  /** Hosts the shell's curl may reach. */
+  readonly allow?: ReadonlyArray<string>
   /** Model access over the DO's key-value store: mock models, or the live ChatGPT-backed layer. */
   readonly models: (kv: KeyValue) => Layer.Layer<MasterModels | CompactorModel | ChatGPT, never, TurnPrefix>
   readonly onError: (error: unknown) => void
@@ -170,7 +171,7 @@ export const openApp = async (options: AppOptions): Promise<App> => {
 
   const registry = createRegistry()
   registry.install(makeOptChatExtension(bridge))
-  registry.install(makeWorkspaceExtension(options.workspace, { exec: options.exec }))
+  registry.install(makeWorkspaceExtension(options.workspace, { exec: options.exec, allow: options.allow ?? [] }))
 
   harness = await Harness.open(storage, {
     models,
@@ -184,6 +185,11 @@ export const openApp = async (options: AppOptions): Promise<App> => {
     onReport: options.onError
   }, ctx)
   const root = await harness.root(ctx, { agent: { model: master, thinkingLevel: "high" } })
+  // The chat outlives a switch between mock and live models: point it at this mode's Master.
+  const current = (await root.agent(ctx)).model
+  if (current?.provider !== master.provider || current?.modelId !== master.modelId) {
+    await root.configure({ model: master }, ctx)
+  }
 
   // Catch up: log anything committed but not yet logged (newest first, until a logged entry).
   {
@@ -263,7 +269,8 @@ export const openApp = async (options: AppOptions): Promise<App> => {
     const queued = await db.get<Row>("SELECT COUNT(*) AS n FROM oc_inbox WHERE state = 'queued'")
     if (Number(queued?.n ?? 0) > 0) return true
     const status = await run(memory.status)
-    return status.busy > 0
+    if (status.busy > 0) return true
+    return (await run(chatgpt.status)).pending !== undefined
   }
 
   return {
@@ -317,7 +324,6 @@ export const openApp = async (options: AppOptions): Promise<App> => {
     },
     login: {
       start: () => run(chatgpt.start),
-      finish: (redirectUrl) => run(chatgpt.finish(redirectUrl)),
       status: () => run(chatgpt.status)
     },
     api: async (route, query) => {

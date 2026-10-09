@@ -6,7 +6,7 @@
  *   bun cli/optchat.ts send "text"                                                 one message, print the answer
  *
  * In the chat: plain lines are input (a steer if the agent is busy). Commands:
- *   /abort  /status  /view  /zoom <id> <n>  /instructions  /instructions set <text>  /login  /login <redirect-url>  /quit
+ *   /abort  /status  /view  /zoom <id> <n>  /instructions  /instructions set <text>  /login  /login status  /quit
  */
 import * as readline from "node:readline"
 
@@ -119,6 +119,10 @@ socket.addEventListener("message", (frame) => {
     case "events":
       for (const event of message.events) render(event)
       break
+    case "notice":
+      newline()
+      console.log(bold(message.text))
+      break
   }
 })
 socket.addEventListener("close", (e) => {
@@ -158,7 +162,7 @@ if (mode === "send") {
         await request({ type: "instructions.set", text: text.slice("/instructions set ".length) })
         console.log(dim("instructions saved"))
       } else if (text === "/login") console.log(bold(String(await request({ type: "login.start" }))))
-      else if (text.startsWith("/login ")) console.log(String(await request({ type: "login.finish", url: text.slice(7) })))
+      else if (text === "/login status") console.log(JSON.stringify(await request({ type: "login.status" }), null, 2))
       else await request({ type: "input", text: raw })
     } catch (error) {
       console.error(`error: ${(error as Error).message}`)

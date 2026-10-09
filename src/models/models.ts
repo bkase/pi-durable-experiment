@@ -5,9 +5,11 @@ import { Context, Effect, Layer } from "effect"
 import { bytes, NODE } from "../optchat/constants.ts"
 import { CompactorModel, ModelError } from "../optchat/memory.ts"
 import { SYSTEM } from "../optchat/prompts.ts"
-import { ChatGPT, type KeyValue } from "./chatgpt.ts"
+import { ChatGPT, type KeyValue } from "./codex.ts"
 
+/** The mock models stand in under this provider id; the live ones are the Codex provider's. */
 export const PROVIDER = "openai"
+export const LIVE_PROVIDER = "openai-codex"
 export const MASTER_MODEL = "gpt-6.1-sol"
 export const COMPACTOR_MODEL = "gpt-6-luna"
 
@@ -192,7 +194,7 @@ export const shapePayload = (options: LiveOptions) => (payload: unknown): unknow
   return out
 }
 
-/** The real models, on the ChatGPT credential the Durable Object holds (ADR 0003). */
+/** The real models: the Codex endpoint, on the ChatGPT credential the Durable Object holds (ADR 0008). */
 export const LiveModels = (options: LiveOptions) =>
   liveCompactor.pipe(Layer.provideMerge(liveMaster(options)))
 
@@ -202,26 +204,27 @@ const liveMaster = (options: LiveOptions) =>
     Effect.gen(function*() {
       const chatgpt = yield* ChatGPT
       const services = yield* Effect.context<never>()
-      const { openaiProvider } = yield* Effect.promise(() => import("@earendil-works/pi-ai/providers/openai"))
-      const inner = openaiProvider()
+      const { openaiCodexProvider } = yield* Effect.promise(() => import("@earendil-works/pi-ai/providers/openai-codex"))
+      const inner = openaiCodexProvider()
       const shape = shapePayload(options)
       const provider = {
         ...inner,
         auth: {
           apiKey: {
-            name: "Sign in with ChatGPT",
+            name: "ChatGPT (Codex sign-in)",
             resolve: async () => ({
               auth: { apiKey: await Effect.runPromiseWith(services)(chatgpt.token) },
-              source: "Sign in with ChatGPT"
+              source: "ChatGPT (Codex sign-in)"
             })
           }
         },
+        // SSE, not WebSockets: the Codex WebSocket transport needs custom headers Workers can't set.
         streamSimple: (model: never, context: never, opts?: Record<string, unknown>) =>
-          inner.streamSimple(model, context, { ...opts, onPayload: (p: unknown) => shape(p) } as never)
+          inner.streamSimple(model, context, { ...opts, transport: "sse", onPayload: (p: unknown) => shape(p) } as never)
       }
       const models = createModels()
       models.setProvider(provider as never)
-      return MasterModels.of({ models, master: { provider: PROVIDER, modelId: MASTER_MODEL } })
+      return MasterModels.of({ models, master: { provider: LIVE_PROVIDER, modelId: MASTER_MODEL } })
     })
   )
 
@@ -234,7 +237,7 @@ const liveCompactor = Layer.effect(
   Effect.gen(function*() {
     const { models } = yield* MasterModels
     const prefix = yield* TurnPrefix
-    const model = models.getModel(PROVIDER, COMPACTOR_MODEL)
+    const model = models.getModel(LIVE_PROVIDER, COMPACTOR_MODEL)
     if (model === undefined) return yield* Effect.die(new Error(`no model ${COMPACTOR_MODEL}`))
     return CompactorModel.of({
       complete: ({ view, turns }) =>
@@ -268,7 +271,7 @@ const liveCompactor = Layer.effect(
                     } as AssistantMessage)
                 )
               })
-              const reply = await models.completeSimple(model, { messages } as never, { reasoning: "xhigh" })
+              const reply = await models.completeSimple(model, { messages } as never, { reasoning: "xhigh", transport: "sse" } as never)
               if (reply.stopReason === "error") throw new Error(reply.errorMessage ?? "compactor request failed")
               const { input, output, cacheRead, cacheWrite } = reply.usage
               return {

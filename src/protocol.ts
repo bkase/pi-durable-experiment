@@ -10,7 +10,7 @@ export const ClientMessage = Schema.Union([
   Schema.Struct({ type: Schema.Literal("instructions.get"), id: Schema.String }),
   Schema.Struct({ type: Schema.Literal("instructions.set"), id: Schema.String, text: Schema.String }),
   Schema.Struct({ type: Schema.Literal("login.start"), id: Schema.String }),
-  Schema.Struct({ type: Schema.Literal("login.finish"), id: Schema.String, url: Schema.String })
+  Schema.Struct({ type: Schema.Literal("login.status"), id: Schema.String })
 ])
 export type ClientMessage = typeof ClientMessage.Type
 
@@ -21,5 +21,6 @@ export type ServerMessage =
   | { readonly type: "result"; readonly id: string; readonly ok: false; readonly error: string }
   | { readonly type: "events"; readonly events: ReadonlyArray<unknown> }
   | { readonly type: "snapshot"; readonly snapshot: unknown }
+  | { readonly type: "notice"; readonly text: string }
 
 export const decodeClientMessage = Schema.decodeUnknownSync(Schema.fromJsonString(ClientMessage))

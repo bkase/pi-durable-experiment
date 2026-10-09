@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { type App, openApp } from "../../src/do/app.ts"
 import { Layer } from "effect"
-import { ChatGPT } from "../../src/models/chatgpt.ts"
+import { ChatGPT } from "../../src/models/codex.ts"
 import { MockModels } from "../../src/models/models.ts"
 import { nodeDoStorage } from "../support/node-do-storage.ts"
 

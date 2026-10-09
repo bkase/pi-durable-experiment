@@ -25,6 +25,7 @@ const optchat :Workerd.Worker = (
     (name = "LOADER", workerLoader = ()),
     (name = "OPTCHAT_TOKEN", text = "dev-token"),
     (name = "MODEL_MODE", text = "${MODEL_MODE:-mock}"),
+    (name = "EGRESS_ALLOW", text = "${EGRESS_ALLOW:-api.github.com,raw.githubusercontent.com}"),
   ],
   durableObjectNamespaces = [ (className = "Chat", uniqueKey = "optchat-chat", enableSql = true) ],
   durableObjectStorage = (localDisk = "do-disk"),

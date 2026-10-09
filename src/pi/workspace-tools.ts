@@ -13,7 +13,10 @@ export const SHELL_BACKEND = "shell"
  * call is a durable task. Writes and exec are not replayed after a crash: the model gets an
  * `interrupted` result instead.
  */
-export const makeWorkspaceExtension = (workspace: Workspace, options: { readonly exec: boolean }) => {
+export const makeWorkspaceExtension = (
+  workspace: Workspace,
+  options: { readonly exec: boolean; readonly allow: ReadonlyArray<string> }
+) => {
   const { tools, execute } = createPiTools({
     workspace,
     ...(options.exec
@@ -23,7 +26,11 @@ export const makeWorkspaceExtension = (workspace: Workspace, options: { readonly
           backends: {
             [SHELL_BACKEND]: {
               description:
-                "A bash-compatible shell (just-bash) over the workspace files: pipes, redirects, coreutils, grep, sed, awk, jq, curl."
+                `A bash-compatible shell (just-bash) over the workspace files: pipes, redirects, coreutils, grep, sed, awk, jq. ${
+                  options.allow.length === 0
+                    ? "It has no network access."
+                    : `curl reaches only these hosts and their subdomains: ${options.allow.join(", ")}.`
+                }`
             }
           }
         }

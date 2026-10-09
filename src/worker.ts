@@ -2,10 +2,10 @@ import { Workspace, WorkspaceServiceProxy } from "@cloudflare/computer"
 import { WorkerShellBackend } from "@cloudflare/computer/backends/worker-shell"
 import curl from "@cloudflare/computer/shell/curl"
 import jq from "@cloudflare/computer/shell/jq"
-import { DurableObject } from "cloudflare:workers"
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers"
 import { deliveryId, parseHookPath, presentedToken, safeEqual } from "./auth.ts"
 import { type App, openApp } from "./do/app.ts"
-import { ChatGPT } from "./models/chatgpt.ts"
+import { ChatGPT } from "./models/codex.ts"
 import { LiveModels, MockModels } from "./models/models.ts"
 import { Layer } from "effect"
 import { decodeClientMessage, type ServerMessage } from "./protocol.ts"
@@ -13,6 +13,25 @@ import { SHELL_BACKEND } from "./pi/workspace-tools.ts"
 
 // The worker-shell's Dynamic Worker reaches the Workspace back through this entrypoint.
 export { WorkspaceServiceProxy }
+
+/**
+ * The shell's only way out to the internet: every request its `curl` makes comes here, and only
+ * hosts on the allow-list (EGRESS_ALLOW, and their subdomains) get through. A prompt-injected
+ * command can't send Workspace files anywhere else.
+ */
+export class EgressGateway extends WorkerEntrypoint<Env, { allow: ReadonlyArray<string> }> {
+  override async fetch(request: Request): Promise<Response> {
+    const host = new URL(request.url).hostname
+    if (!this.ctx.props.allow.some((domain) => host === domain || host.endsWith(`.${domain}`))) {
+      return new Response(`blocked: ${host} is not on this agent's allow-list`, { status: 403 })
+    }
+    return fetch(request)
+  }
+}
+
+/** Hosts the shell may reach. */
+const allowList = (env: Env) =>
+  (env.EGRESS_ALLOW ?? "").split(",").map((d) => d.trim().toLowerCase()).filter((d) => d.length > 0)
 
 export interface Env {
   readonly Chat: DurableObjectNamespace<Chat>
@@ -22,6 +41,8 @@ export interface Env {
   readonly MODEL_MODE?: string
   /** "on" sends the spec's explicit cache marks (unverified Responses API fields). */
   readonly CACHE_MARKS?: string
+  /** Comma-separated hosts the shell may reach (subdomains included). */
+  readonly EGRESS_ALLOW?: string
 }
 
 const CHAT = "main"
@@ -74,7 +95,13 @@ export class Chat extends DurableObject<Env> {
             loader: env.LOADER as never,
             workspace: { binding: "Chat", id: ctx.id.toString() },
             ctx,
-            commands: [curl, jq]
+            commands: [curl, jq],
+            egress: {
+              mode: "http-gateway",
+              gateway: (ctx as unknown as { exports: { EgressGateway: (o: { props: unknown }) => Fetcher } }).exports
+                .EgressGateway({ props: { allow: allowList(env) } }),
+              revision: allowList(env).join(",")
+            }
           })
         ]
         : []
@@ -91,16 +118,22 @@ export class Chat extends DurableObject<Env> {
   }
 
   private open(): Promise<App> {
+    const signedIn = () =>
+      this.broadcast({
+        type: "notice",
+        text: `Signed in to ChatGPT.${this.env.MODEL_MODE === "live" ? "" : " Set MODEL_MODE=live in .env and redeploy to use it."}`
+      })
     this.app ??= openApp({
       storage: this.ctx.storage as never,
       workspace: this.workspace,
       exec: this.env.LOADER !== undefined,
+      allow: allowList(this.env),
       models: (kv) =>
         this.env.MODEL_MODE === "live"
           ? LiveModels({ serviceTier: "priority", explicitCacheMarks: this.env.CACHE_MARKS === "on" }).pipe(
-            Layer.provideMerge(ChatGPT.layer(kv))
+            Layer.provideMerge(ChatGPT.layer(kv, { onSignedIn: signedIn }))
           )
-          : Layer.merge(MockModels, ChatGPT.layer(kv)),
+          : Layer.merge(MockModels, ChatGPT.layer(kv, { onSignedIn: signedIn })),
       onFatal: (error) => {
         // Background work (pi-durable's scheduler, the Compactor) would otherwise keep failing on the
         // dead storage until the CPU limit; a fresh instance resumes everything from storage.
@@ -200,14 +233,13 @@ export class Chat extends DurableObject<Env> {
         case "instructions.set":
           await app.setInstructions(message.text)
           return ok("saved")
-        case "login.start":
-          return ok(
-            `Open this URL, sign in, then paste the URL the browser lands on (it will fail to load; that is expected) with /login <url>:\n${await app
-              .login.start()}`
-          )
-        case "login.finish":
-          await app.login.finish(message.url)
-          return ok(`Signed in to ChatGPT.${this.env.MODEL_MODE === "live" ? "" : " Deploy with MODEL_MODE=live to use it."}`)
+        case "login.start": {
+          const { userCode, verificationUri } = await app.login.start()
+          await this.heartbeat()
+          return ok(`Open ${verificationUri} and enter the code ${userCode} (valid 15 minutes). I'll let you know when it's done.`)
+        }
+        case "login.status":
+          return ok(await app.login.status())
       }
     } catch (error) {
       reply({ type: "result", id, ok: false, error: error instanceof Error ? error.message : String(error) })

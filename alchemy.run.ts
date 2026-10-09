@@ -24,7 +24,9 @@ export const Worker = Cloudflare.Worker("OptChat", {
     OPTCHAT_TOKEN: Config.Redacted("OPTCHAT_TOKEN"),
     // "mock" (scripted models) until you've signed in with /login; then set MODEL_MODE=live in .env.
     MODEL_MODE: Config.String("MODEL_MODE").pipe(Config.withDefault("mock")),
-    CACHE_MARKS: Config.String("CACHE_MARKS").pipe(Config.withDefault("off"))
+    CACHE_MARKS: Config.String("CACHE_MARKS").pipe(Config.withDefault("off")),
+    // Hosts the agent's shell may reach with curl (subdomains included); everything else is blocked.
+    EGRESS_ALLOW: Config.String("EGRESS_ALLOW").pipe(Config.withDefault("api.github.com,raw.githubusercontent.com"))
   }
 })
 
